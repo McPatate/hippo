@@ -3,10 +3,10 @@
 > Your AI memory as plain files you own, encrypted locally and backed up to a Hugging Face bucket, so every agent can use it and none can keep it.
 
 ```sh
-cargo install --path .
-hippo init                          # vault + key + private HF bucket + first verified backup
-claude mcp add hippo -- hippo mcp   # connect an agent
+cargo install --git ssh://git@github.com/McPatate/hippo
+hippo init    # vault + key + private HF bucket + verified backup, connects Claude Code, imports its memories
 ```
+On a new machine, `hippo init` finds your vault in the bucket and restores it (put your key at `~/.hippo/key.txt` first).
 
 ## Why hippo?
 
@@ -36,6 +36,11 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 | `hippo restore <user>/<bucket>` | new machine: rebuild from backup + key |
 | `hippo login [--device]` | sign in with Hugging Face (only if `hf auth login` isn't set up) |
 | `hippo key` | where your key is and how to keep it safe |
+| `hippo connect claude [--pixel]` · `hippo disconnect claude` | MCP + memory instructions + status line (wraps yours); fully reversible |
+| `hippo import claude-code [--dry-run]` | import Claude Code memories (re-runnable, read-only on the source) |
+| `hippo statusline [--wrap '<cmd>']` | `🦛 remembered prefers-rust 3s ago · ✓ backed up #12 · 73 memories` |
+| `hippo buddy [--name …] [--color …]` | meet your hippo (the `--pixel` status line) |
+| `hippo scan` · `hippo log` | secret scan (offline) · recent actions |
 | `hippo mcp` | MCP server for agents |
 
 **Agent mode:** in an agent environment (`AI_AGENT`, `CLAUDECODE`, …) or with `--agent`, every command prints one JSON object, never prompts, and errors are `{"ok":false,"error","hint"}`. Destructive commands refuse to run from agents.

@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod backup;
 pub mod config;
+pub mod connect;
 pub mod crypto;
 pub mod git;
 pub mod import;

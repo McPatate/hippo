@@ -38,6 +38,9 @@ pub struct GlobalConfig {
     /// Your hippo buddy (statusline `--pixel`).
     #[serde(default)]
     pub buddy: Buddy,
+    /// The status line hippo wrapped in Claude Code settings, restored by `hippo disconnect claude`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude_statusline_backup: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

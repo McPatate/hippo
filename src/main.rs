@@ -137,6 +137,16 @@ enum Cmd {
         #[arg(long, hide = true, env = "HIPPO_PIXEL")]
         pixel: bool,
     },
+    /// Connect hippo to an agent harness (MCP + memory instructions + optional status line)
+    Connect {
+        #[command(subcommand)]
+        harness: Harness,
+    },
+    /// Undo `hippo connect` (restores anything it changed)
+    Disconnect {
+        #[command(subcommand)]
+        harness: Harness,
+    },
     /// Meet your hippo buddy: name it, pick a color (shown by `statusline --pixel`)
     Buddy {
         #[arg(long)]
@@ -151,6 +161,19 @@ enum Cmd {
     Compact {
         #[arg(long)]
         prune: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum Harness {
+    /// Claude Code
+    Claude {
+        /// Don't touch the status line
+        #[arg(long)]
+        no_statusline: bool,
+        /// Status line with the pixel hippo buddy
+        #[arg(long)]
+        pixel: bool,
     },
 }
 
@@ -232,6 +255,11 @@ fn prompt(question: &str, default: &str) -> Result<String> {
 fn confirm(question: &str) -> Result<bool> {
     let a = prompt(question, "Y/n")?.to_lowercase();
     Ok(!matches!(a.as_str(), "n" | "no"))
+}
+
+fn confirm_default_no(question: &str) -> Result<bool> {
+    let a = prompt(question, "y/N")?.to_lowercase();
+    Ok(matches!(a.as_str(), "y" | "yes"))
 }
 
 async fn hf_username() -> Result<String> {
@@ -316,8 +344,47 @@ fn status_json(v: &Vault, s: &backup::Status) -> Value {
     })
 }
 
+#[derive(serde::Serialize)]
+struct ImportReport {
+    new: usize,
+    updated: usize,
+    unchanged: usize,
+    commit: Option<String>,
+    backup_seq: Option<u64>,
+    memories: Vec<hippo::import::Planned>,
+}
+
+async fn import_claude(v: &Vault, from: &std::path::Path, dry_run: bool) -> Result<ImportReport> {
+    use hippo::import::{Status, count};
+    let (plans, commit) = hippo::import::plan_and_import_claude(v, from, dry_run)?;
+    if commit.is_some() {
+        hippo::log::record(&v.root, "import", json!({"source": "claude-code", "new": count(&plans, Status::New), "updated": count(&plans, Status::Updated)}));
+    }
+    let mut backup_seq = None;
+    if commit.is_some() && v.config.remote.is_some() {
+        let (key, remote, _) = remote_for(v)?;
+        backup_seq = backup::backup(v, &key, &remote).await?.seq;
+    }
+    Ok(ImportReport {
+        new: count(&plans, Status::New),
+        updated: count(&plans, Status::Updated),
+        unchanged: count(&plans, Status::Unchanged),
+        commit,
+        backup_seq,
+        memories: plans,
+    })
+}
+
+/// Vaults already in `target` (empty if the bucket doesn't exist yet or can't be listed).
+async fn existing_vaults(target: &str) -> Vec<hippo::backup::VaultManifest> {
+    let Ok(rc) = RemoteConfig::parse(target) else { return vec![] };
+    let Ok(remote) = Remote::open(&rc) else { return vec![] };
+    backup::list_vaults(&remote).await.unwrap_or_default()
+}
+
 async fn cmd_init(out: &Out, cli: &Cli, path: Option<PathBuf>, remote: Option<String>, no_remote: bool, yes: bool) -> Result<()> {
     let interactive = !yes && !out.agent && std::io::stdin().is_terminal();
+    let ask = |q: &str| -> Result<bool> { if interactive { confirm(q) } else { Ok(true) } };
     out.say(format!("\n  {} — your memory, your files, your keys.\n", bold("🦛 hippo")));
 
     let default_path = path.or(cli.vault.clone()).unwrap_or_else(config::default_vault_path);
@@ -326,68 +393,138 @@ async fn cmd_init(out: &Out, cli: &Cli, path: Option<PathBuf>, remote: Option<St
     } else {
         default_path
     };
-
     let kp = config::key_path();
-    let (key, key_created) = if kp.exists() { (Key::load(&kp)?, false) } else { (Key::generate(&kp)?, true) };
+    let mut key_created = false;
+    let mut outcome = "created";
+    let mut first_backup = None;
 
-    let mut vault = Vault::init(&path, &key)?;
+    let vault = if hippo::config::VaultConfig::load(&path).is_ok() {
+        // Re-running init on a set-up machine is fine: skip to the integration steps.
+        outcome = "existing";
+        out.say(format!("  {} vault already set up at {}", green("✓"), pretty_path(&path)));
+        Vault::open(&path)?
+    } else {
+        // Where would backups go?
+        let target = if no_remote {
+            None
+        } else if let Some(r) = remote {
+            Some(r)
+        } else {
+            let mut who = hf_username().await;
+            if who.is_err() && interactive && hippo::auth::client_id().is_some() && confirm("Sign in with Hugging Face to enable encrypted backups?")? {
+                login(out, !hippo::auth::can_open_browser()).await?;
+                who = hf_username().await;
+            }
+            match who {
+                Ok(user) => Some(format!("{user}/hippo")),
+                Err(e) => {
+                    out.say(format!("  {} backups not configured: {}", yellow("!"), e.to_string().lines().next().unwrap_or("")));
+                    out.say("    → later: `hf auth login` then `hippo remote set <username>/hippo`");
+                    None
+                }
+            }
+        };
+        let found = match &target {
+            Some(t) => existing_vaults(t).await,
+            None => vec![],
+        };
+        let key = kp.exists().then(|| Key::load(&kp)).transpose()?;
+        let mine = key.as_ref().and_then(|k| found.iter().find(|m| m.recipient == k.recipient()));
+
+        if let (Some(t), Some(k), Some(m)) = (&target, &key, mine) {
+            // Recovery: this key's vault is already in the bucket.
+            out.say(format!("  {} found your vault in {} (created {})", green("✓"), RemoteConfig::parse(t)?.display(), m.created_at.format("%Y-%m-%d")));
+            if !ask("Restore it here?")? {
+                bail!("not restoring, nothing changed\n  → Pick another vault location, or `hippo init --no-remote` for a separate local vault");
+            }
+            let rc = RemoteConfig::parse(t)?;
+            let r = backup::restore(&Remote::open(&rc)?, &rc, k, &path, backup::RestoreOptions { vault_id: Some(m.vault_id.clone()), device: None }).await?;
+            outcome = "restored";
+            out.say(format!("  {} restored {} memories from {} backup(s)", green("✓"), r.vault.list()?.len(), r.bundles));
+            r.vault
+        } else {
+            if !found.is_empty() {
+                let why = if key.is_some() { "a different key" } else { "a key that isn't on this machine" };
+                out.say(yellow(&format!("  ⚠ {} has hippo backups encrypted to {why}.", target.as_deref().unwrap_or(""))));
+                out.say(format!("    If you have that key, put it at {} and rerun `hippo init`.", pretty_path(&kp)));
+                if !interactive && !yes {
+                    bail!("refusing to create a second vault next to existing backups\n  → Restore your key first, or rerun with --yes to create a new vault (old backups stay untouched)");
+                }
+                if interactive && !confirm_default_no("Create a new vault anyway? Old backups stay untouched.")? {
+                    bail!("nothing changed");
+                }
+            }
+            let key = match key {
+                Some(k) => k,
+                None => {
+                    key_created = true;
+                    Key::generate(&kp)?
+                }
+            };
+            let mut vault = Vault::init(&path, &key)?;
+            out.say(format!("  {} vault created at {}", green("✓"), pretty_path(&path)));
+            if key_created {
+                out.say(format!("  {} key created at {}\n", green("✓"), pretty_path(&kp)));
+                out.say(format!("{}\n", yellow(ui::KEY_DISCLAIMER)));
+            } else {
+                out.say(format!("  {} using existing key {}", green("✓"), pretty_path(&kp)));
+            }
+            if let Some(t) = target {
+                if ask(&format!("Back up (encrypted) to a private Hugging Face bucket {}?", bold(&t)))? {
+                    let rc = setup_remote(out, &t).await?;
+                    vault.config.remote = Some(rc.clone());
+                    vault.config.save(&vault.root)?;
+                    let r = backup::backup(&vault, &key, &Remote::open(&rc)?).await?;
+                    first_backup = r.seq;
+                    out.say(format!("  {} first backup verified (#{}) in {}", green("✓"), r.seq.unwrap_or(0), rc.display()));
+                }
+            }
+            vault
+        }
+    };
     let mut gc = GlobalConfig::load()?;
     if gc.default_vault.is_none() || interactive {
         gc.default_vault = Some(path.clone());
         gc.save()?;
     }
-    out.say(format!("  {} vault created at {}", green("✓"), pretty_path(&path)));
-    if key_created {
-        out.say(format!("  {} key created at {}\n", green("✓"), pretty_path(&kp)));
-        out.say(format!("{}\n", yellow(ui::KEY_DISCLAIMER)));
-    } else {
-        out.say(format!("  {} using existing key {}", green("✓"), pretty_path(&kp)));
-    }
 
-    let target = if no_remote {
-        None
-    } else if let Some(r) = remote {
-        Some(r)
-    } else {
-        let mut who = hf_username().await;
-        if who.is_err() && interactive && hippo::auth::client_id().is_some() && confirm("Sign in with Hugging Face to enable encrypted backups?")? {
-            login(out, !hippo::auth::can_open_browser()).await?;
-            who = hf_username().await;
+    // Agent integration + import.
+    let mut connected = None;
+    if hippo::connect::claude_available() {
+        if hippo::connect::mcp_connected() {
+            out.say(format!("  {} Claude Code already connected", green("✓")));
+        } else if (interactive || yes) && ask("Connect Claude Code? (memory tools, memory instructions, status line)")? {
+            let r = hippo::connect::connect_claude(true, false)?;
+            out.say(format!("  {} Claude Code connected: MCP {} · instructions {} · status line {}", green("✓"), r.mcp, r.instructions, r.statusline));
+            connected = Some(r);
         }
-        match who {
-            Ok(user) => {
-                let suggestion = format!("{user}/hippo");
-                if !interactive || confirm(&format!("Back up (encrypted) to a private Hugging Face bucket {}?", bold(&suggestion)))? {
-                    Some(suggestion)
-                } else {
-                    None
-                }
-            }
-            Err(e) => {
-                out.say(format!("  {} backups not configured: {}", yellow("!"), e.to_string().lines().next().unwrap_or("")));
-                out.say("    → later: `hf auth login` then `hippo remote set <username>/hippo`");
-                None
-            }
+    }
+    let mut imported = None;
+    let from = hippo::import::default_claude_dir();
+    if from.is_dir() {
+        let plan = import_claude(&vault, &from, true).await?;
+        let todo = plan.new + plan.updated;
+        if todo > 0 && (interactive || yes) && ask(&format!("Import {todo} memories from Claude Code? (read-only: Claude's copies stay)"))? {
+            let r = import_claude(&vault, &from, false).await?;
+            out.say(format!("  {} imported {} new, {} updated", green("✓"), r.new, r.updated));
+            imported = Some(r);
         }
-    };
-    let mut first_backup = None;
-    if let Some(t) = target {
-        let rc = setup_remote(out, &t).await?;
-        vault.config.remote = Some(rc.clone());
-        vault.config.save(&vault.root)?;
-        let r = backup::backup(&vault, &key, &Remote::open(&rc)?).await?;
-        first_backup = r.seq;
-        out.say(format!("  {} first backup verified (#{}) in {}", green("✓"), r.seq.unwrap_or(0), rc.display()));
     }
 
     out.done(
-        json!({"vault": path, "key": kp, "key_created": key_created, "remote": vault.config.remote.as_ref().map(|r| r.display()), "first_backup": first_backup}),
+        json!({
+            "vault": path, "outcome": outcome, "key": kp, "key_created": key_created,
+            "remote": vault.config.remote.as_ref().map(|r| r.display()), "first_backup": first_backup,
+            "claude": connected, "imported": imported.as_ref().map(|r| json!({"new": r.new, "updated": r.updated})),
+        }),
         || {
-            format!(
-                "\n  Connect an agent:\n    {}\n  Add a memory:\n    {}\n",
-                bold("claude mcp add hippo -- hippo mcp"),
-                bold("hippo add prefers-rust -t user -m \"Prefers Rust for side projects\"")
-            )
+            let s = backup::status(&vault).map(|s| ui::status_text(&vault, &s, ui::color())).unwrap_or_default();
+            let next = if connected.is_some() || hippo::connect::mcp_connected() {
+                "Restart Claude Code to load hippo, then ask it to remember something."
+            } else {
+                "Connect an agent: `hippo connect claude`"
+            };
+            format!("\n{s}\n  {next}\n")
         },
     );
     Ok(())
@@ -474,6 +611,26 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                     None => println!("{ours}"),
                 }
             }
+            Ok(())
+        }
+        Cmd::Connect { harness: Harness::Claude { no_statusline, pixel } } => {
+            let r = hippo::connect::connect_claude(!*no_statusline, *pixel)?;
+            out.done(json!(r), || {
+                format!(
+                    "{} Claude Code connected\n  MCP          {}\n  instructions {}\n  status line  {}\n  → Restart Claude Code to load hippo. Undo anytime: `hippo disconnect claude`",
+                    green("✓"), r.mcp, r.instructions, r.statusline
+                )
+            });
+            Ok(())
+        }
+        Cmd::Disconnect { harness: Harness::Claude { .. } } => {
+            let r = hippo::connect::disconnect_claude()?;
+            out.done(json!(r), || {
+                format!(
+                    "{} Claude Code disconnected\n  MCP          {}\n  instructions {}\n  status line  {}\n  Your vault and backups are untouched.",
+                    green("✓"), r.mcp, r.instructions, r.statusline
+                )
+            });
             Ok(())
         }
         Cmd::Buddy { name, color } => {
@@ -736,28 +893,24 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         Cmd::Import { source: ImportSource::ClaudeCode { from, dry_run } } => {
             let v = open_vault(cli)?;
             let from = from.clone().unwrap_or_else(hippo::import::default_claude_dir);
-            let (plans, commit) = hippo::import::plan_and_import_claude(&v, &from, *dry_run)?;
-            if commit.is_some() { hippo::log::record(&v.root, "import", json!({"source": "claude-code", "count": plans.len()})); }
-            let mut backup_seq = None;
-            if commit.is_some() && v.config.remote.is_some() {
-                let (key, remote, _) = remote_for(&v)?;
-                backup_seq = backup::backup(&v, &key, &remote).await?.seq;
-            }
-            out.done(
-                json!({"dry_run": dry_run, "count": plans.len(), "commit": commit, "backup_seq": backup_seq, "memories": plans}),
-                || {
-                    let mut s = String::new();
-                    for p in &plans {
-                        s += &format!("  {:<44} {:<9} {}{}\n", p.name, p.kind, p.project, if p.renamed { "  (renamed: name collision)" } else { "" });
-                    }
-                    s += &if *dry_run {
-                        format!("{} would import {} memories (dry run)", dim("…"), plans.len())
-                    } else {
-                        format!("{} imported {} memories{}", green("✓"), plans.len(), backup_seq.map(|n| format!(", backup #{n} verified")).unwrap_or_default())
-                    };
-                    s
-                },
-            );
+            let r = import_claude(&v, &from, *dry_run).await?;
+            out.done(json!(r), || {
+                let mut s = String::new();
+                for p in r.memories.iter().filter(|p| p.status != hippo::import::Status::Unchanged) {
+                    let st = if p.status == hippo::import::Status::New { "new" } else { "updated" };
+                    s += &format!("  {:<8} {:<44} {:<9} {}{}\n", st, p.name, p.kind, p.project, if p.renamed { "  (renamed: name collision)" } else { "" });
+                }
+                let verb = if *dry_run { "would import" } else { "imported" };
+                s += &format!(
+                    "{} {verb}: {} new, {} updated, {} already in hippo{}",
+                    if *dry_run { dim("…") } else { green("✓") },
+                    r.new,
+                    r.updated,
+                    r.unchanged,
+                    r.backup_seq.map(|n| format!(" · backup #{n} verified")).unwrap_or_default()
+                );
+                s
+            });
             Ok(())
         }
         Cmd::Login { device } => {
