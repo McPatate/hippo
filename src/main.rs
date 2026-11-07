@@ -21,7 +21,7 @@ struct Cli {
     vault: Option<PathBuf>,
     /// Machine-readable mode: JSON on stdout, no prompts, no colors.
     /// Auto-enabled when an AI agent environment is detected (AI_AGENT, CLAUDECODE, …).
-    #[arg(long, global = true, env = "HIPPO_AGENT_MODE")]
+    #[arg(long, global = true, env = "HIPPO_AGENT_MODE", value_parser = clap::builder::BoolishValueParser::new())]
     agent: bool,
     /// Force human mode even inside an agent environment
     #[arg(long, global = true, conflicts_with = "agent")]
@@ -134,7 +134,7 @@ enum Cmd {
         /// Run your existing status line command (gets the same stdin) and append hippo to its last line
         #[arg(long)]
         wrap: Option<String>,
-        #[arg(long, hide = true, env = "HIPPO_PIXEL")]
+        #[arg(long, hide = true, env = "HIPPO_PIXEL", value_parser = clap::builder::BoolishValueParser::new())]
         pixel: bool,
     },
     /// Connect hippo to an agent harness (MCP + memory instructions + optional status line)
