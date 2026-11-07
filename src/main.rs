@@ -524,7 +524,13 @@ async fn cmd_init(out: &Out, cli: &Cli, path: Option<PathBuf>, remote: Option<St
             } else {
                 "Connect an agent: `hippo connect claude`"
             };
-            format!("\n{s}\n  {next}\n")
+            // Fresh keys get the full warning above; otherwise a short nudge, every time.
+            let nudge = if key_created {
+                String::new()
+            } else {
+                format!("  🔑 {}\n", yellow(&format!("Don't forget to safekeep your key: {} (`hippo key`)", pretty_path(&kp))))
+            };
+            format!("\n{s}\n{nudge}  {next}\n")
         },
     );
     Ok(())
