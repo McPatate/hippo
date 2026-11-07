@@ -1,6 +1,6 @@
 # 🦛 hippo
 
-> Your AI memory as plain files you own, encrypted locally and backed up to a Hugging Face bucket, so every agent can use it and none can keep it.
+Your AI memory as plain files you own, encrypted locally and backed up to a Hugging Face bucket, so every agent can use it and none can keep it.
 
 ```sh
 curl -fsSL https://mcpatate.github.io/hippo/install.sh | sh
