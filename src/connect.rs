@@ -63,7 +63,12 @@ pub fn mcp_connected() -> bool {
 
 fn connect_mcp() -> Result<String> {
     if mcp_connected() {
-        return Ok("already connected (user scope)".into());
+        let get = Command::new("claude").args(["mcp", "get", "hippo"]).output()?;
+        if String::from_utf8_lossy(&get.stdout).contains(&exe()) {
+            return Ok("already connected (user scope)".into());
+        }
+        // The hippo binary moved (e.g. cargo → prebuilt): re-register at the new path.
+        Command::new("claude").args(["mcp", "remove", "-s", "user", "hippo"]).output()?;
     }
     let out = Command::new("claude")
         .args(["mcp", "add", "-s", "user", "hippo", "--", &exe(), "mcp"])
