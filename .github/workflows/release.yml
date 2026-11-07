@@ -9,6 +9,8 @@ permissions:
   contents: write
 env:
   TAG: ${{ inputs.tag || github.ref_name }}
+  BUCKET: hf://buckets/mcpotato/hippo-releases
+  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 jobs:
   build:
     strategy:
@@ -33,9 +35,23 @@ jobs:
         run: |
           gh release view "$TAG" -R ${{ github.repository }} || gh release create "$TAG" -R ${{ github.repository }} --draft --generate-notes || true
           gh release upload "$TAG" -R ${{ github.repository }} hippo-*.tar.gz* --clobber
+      - uses: astral-sh/setup-uv@v6
+      - name: mirror to HF bucket
+        run: |
+          [ -n "$HF_TOKEN" ] || { echo "HF_TOKEN not set, skipping"; exit 0; }
+          for f in hippo-*.tar.gz*; do uvx --from huggingface_hub hf buckets cp "$f" "$BUCKET/$TAG/$f"; done
   publish:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+        with: { ref: "${{ env.TAG }}" }
+      - uses: astral-sh/setup-uv@v6
+      - name: point the HF bucket at this release
+        run: |
+          [ -n "$HF_TOKEN" ] || { echo "HF_TOKEN not set, skipping"; exit 0; }
+          echo "$TAG" > latest.txt
+          uvx --from huggingface_hub hf buckets cp install.sh "$BUCKET/install.sh"
+          uvx --from huggingface_hub hf buckets cp latest.txt "$BUCKET/latest.txt"
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: gh release edit "$TAG" -R ${{ github.repository }} --draft=false --latest
