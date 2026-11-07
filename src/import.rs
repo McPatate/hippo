@@ -77,12 +77,26 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
             continue;
         }
         let Some(proj) = m.extra.get("claude_project") else { continue };
-        let stem = m.extra.get("claude_file").cloned().unwrap_or_else(|| {
-            // Imports from before `claude_file` existed: name is the stem, maybe project-prefixed.
-            let p = format!("{}-", short_project(proj));
-            m.name.strip_prefix(&p).unwrap_or(&m.name).to_string()
-        });
-        imported.insert((proj.clone(), slugify(&stem)), m.clone());
+        if let Some(stem) = m.extra.get("claude_file") {
+            imported.insert((proj.clone(), slugify(stem)), m.clone());
+        }
+    }
+    // Imports from before `claude_file` existed: the name is the stem, possibly prefixed with the
+    // project on a collision. The plain name wins; the stripped form is only a fallback, so a stem
+    // that itself starts with the project name (`picklescan_venv`) isn't mistaken for a new memory.
+    let legacy: Vec<&Memory> = existing
+        .iter()
+        .filter(|m| m.extra.get("source").map(String::as_str) == Some("claude-code") && !m.extra.contains_key("claude_file"))
+        .collect();
+    for m in &legacy {
+        let proj = &m.extra["claude_project"];
+        imported.entry((proj.clone(), m.name.clone())).or_insert_with(|| (*m).clone());
+    }
+    for m in &legacy {
+        let proj = &m.extra["claude_project"];
+        if let Some(stripped) = m.name.strip_prefix(&format!("{}-", short_project(proj))) {
+            imported.entry((proj.clone(), stripped.to_string())).or_insert_with(|| (*m).clone());
+        }
     }
     let taken_by_other: HashMap<String, ()> = existing
         .iter()

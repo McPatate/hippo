@@ -363,3 +363,31 @@ async fn fast_commit_keeps_git_consistent() {
     let b = e.restore_to("b").await.unwrap();
     assert_eq!(body(&b, "a"), "two\n");
 }
+
+/// Regression: a legacy import (no `claude_file`) whose stem starts with the project name
+/// (`picklescan_venv` in project `picklescan`) must be recognised, not re-imported as a duplicate.
+#[tokio::test]
+async fn import_recognises_legacy_project_named_stems() {
+    let e = env();
+    let v = e.vault("a");
+    let src = e.root.join("claude");
+    // Real project dirs start with the home path, which the importer strips (`-Users-luc-work-picklescan`).
+    let proj = format!("{}-work-picklescan", dirs::home_dir().unwrap().to_string_lossy().replace(['/', '.'], "-"));
+    let d = src.join(&proj).join("memory");
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::write(d.join("picklescan_venv.md"), "---\nname: picklescan_venv\ndescription: venv\ntype: reference\n---\nUse ~/.venv/picklescan.\n").unwrap();
+    std::fs::write(d.join("notes.md"), "---\nname: notes\ndescription: n\ntype: note\n---\nSee [[picklescan_venv]].\n").unwrap();
+    // Simulate what the first importer version wrote: no `claude_file`.
+    for (name, desc, kind, body) in [("picklescan-venv", "venv", "reference", "Use ~/.venv/picklescan.\n"), ("notes", "n", "note", "See [[picklescan-venv]].\n")] {
+        let mut m = Memory { name: name.into(), description: desc.into(), kind: kind.into(), body: body.into(), ..Default::default() };
+        m.tags = vec!["claude-code".into(), "picklescan".into()];
+        m.extra.insert("source".into(), "claude-code".into());
+        m.extra.insert("claude_project".into(), proj.clone());
+        v.write_memory(&m).unwrap();
+    }
+    v.save("legacy import").unwrap();
+    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    assert!(commit.is_none(), "{plans:?}");
+    assert_eq!(hippo::import::count(&plans, hippo::import::Status::Unchanged), 2);
+    assert_eq!(v.list().unwrap().len(), 2);
+}
