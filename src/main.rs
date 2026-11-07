@@ -155,6 +155,8 @@ enum Cmd {
         #[arg(long)]
         color: Option<String>,
     },
+    /// Update hippo to the latest release (prebuilt binary)
+    Update,
     /// Run the MCP server on stdio (Claude, ChatGPT desktop, Cursor…)
     Mcp,
     /// Show backup storage usage (pruning: human-only, not implemented yet)
@@ -932,6 +934,16 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             out.done(json!({"removed": removed}), || {
                 if removed { format!("{} signed out of hippo", green("✓")) } else { "not signed in via hippo".into() }
             });
+            Ok(())
+        }
+        Cmd::Update => {
+            let exe = std::env::current_exe()?.canonicalize()?;
+            let dir = exe.parent().context("cannot locate the hippo binary")?;
+            let fetch = "if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then gh api repos/McPatate/hippo/contents/install.sh -H 'Accept: application/vnd.github.raw'; else curl -fsSL https://raw.githubusercontent.com/McPatate/hippo/main/install.sh; fi | sh";
+            let ok = std::process::Command::new("sh").args(["-c", fetch]).env("HIPPO_INSTALL_DIR", dir).status()?.success();
+            if !ok {
+                bail!("update failed\n  → Retry, or reinstall: cargo install --git https://github.com/McPatate/hippo");
+            }
             Ok(())
         }
         Cmd::Mcp => {
