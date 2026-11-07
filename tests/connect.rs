@@ -29,6 +29,11 @@ fn connect_and_disconnect_round_trip() {
     }
     let settings = r#"{
   "model": "opus",
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf:*)"
+    ]
+  },
   "statusLine": {
     "type": "command",
     "command": "echo 'my line'",
@@ -56,7 +61,11 @@ fn connect_and_disconnect_round_trip() {
     assert!(cmd.contains("statusline --wrap 'echo '\\''my line'\\'''"), "{cmd}");
     assert_eq!(s["statusLine"]["padding"], 1);
     let keys: Vec<&String> = s.as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["model", "statusLine", "theme"], "key order preserved");
+    assert_eq!(keys, ["model", "permissions", "statusLine", "theme"], "key order preserved");
+    let deny: Vec<&str> = s["permissions"]["deny"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(deny[0], "Bash(rm -rf:*)", "user rule kept first");
+    assert!(deny.iter().any(|r| r.starts_with("Read(//") && r.ends_with("hippo-home/**)")), "{deny:?}");
+    assert!(deny.iter().any(|r| r.starts_with("Edit(//") && r.ends_with("hippo-home)")), "{deny:?}");
     assert_eq!(read(&claude.join("settings.json.hippo-backup")), settings, "one-time backup of the original");
 
     // Idempotent: no double block, no double wrap.

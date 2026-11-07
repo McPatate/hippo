@@ -51,6 +51,7 @@ pub struct Report {
     pub mcp: String,
     pub instructions: String,
     pub statusline: String,
+    pub file_access: String,
 }
 
 /// Is hippo registered as a user-scope MCP server?
@@ -217,6 +218,79 @@ fn disconnect_statusline() -> Result<String> {
     Ok(what.into())
 }
 
+/// Paths Claude's own tools must not touch: hippo home (key, config) and the vault if elsewhere.
+fn guarded_paths() -> Vec<String> {
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut dirs = vec![crate::config::hippo_home()];
+    if let Some(v) = crate::config::GlobalConfig::load().ok().and_then(|g| g.default_vault) {
+        if !v.starts_with(&dirs[0]) {
+            dirs.push(v);
+        }
+    }
+    dirs.iter()
+        .map(|d| match d.strip_prefix(&home) {
+            Ok(rel) => format!("~/{}", rel.display()),
+            Err(_) => format!("/{}", d.display()), // `//abs` in Claude Code rule syntax
+        })
+        .collect()
+}
+
+fn deny_rules() -> Vec<String> {
+    guarded_paths()
+        .iter()
+        .flat_map(|p| [format!("Read({p})"), format!("Read({p}/**)"), format!("Edit({p})"), format!("Edit({p}/**)")])
+        .collect()
+}
+
+/// Deny Claude's file tools (and the Bash file commands it recognises) access to hippo's files,
+/// so MCP is the only door. Records what it added so disconnect removes exactly that.
+fn connect_file_access() -> Result<String> {
+    let mut settings = load_settings()?;
+    let obj = settings.as_object_mut().context("settings.json is not a JSON object")?;
+    let deny = obj
+        .entry("permissions")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("permissions is not an object")?
+        .entry("deny")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .context("permissions.deny is not a list")?;
+    let mut gc = crate::config::GlobalConfig::load()?;
+    for rule in deny_rules() {
+        if !deny.iter().any(|r| r.as_str() == Some(&rule)) {
+            deny.push(json!(rule));
+            gc.claude_deny_added.push(rule);
+        }
+    }
+    save_settings(&settings)?;
+    gc.save()?;
+    Ok("Claude's file tools denied on hippo's files (enable `/sandbox` to also stop scripts)".into())
+}
+
+fn disconnect_file_access() -> Result<String> {
+    let mut gc = crate::config::GlobalConfig::load()?;
+    if gc.claude_deny_added.is_empty() {
+        return Ok("untouched".into());
+    }
+    let mut settings = load_settings()?;
+    if let Some(perms) = settings.get_mut("permissions").and_then(Value::as_object_mut) {
+        if let Some(deny) = perms.get_mut("deny").and_then(Value::as_array_mut) {
+            deny.retain(|r| !r.as_str().is_some_and(|r| gc.claude_deny_added.iter().any(|a| a == r)));
+            if deny.is_empty() {
+                perms.remove("deny");
+            }
+        }
+        if perms.is_empty() {
+            settings.as_object_mut().unwrap().remove("permissions");
+        }
+    }
+    save_settings(&settings)?;
+    gc.claude_deny_added.clear();
+    gc.save()?;
+    Ok("deny rules removed".into())
+}
+
 pub fn connect_claude(statusline: bool, pixel: bool) -> Result<Report> {
     if !claude_available() {
         bail!("Claude Code CLI (`claude`) not found on PATH\n  → Install Claude Code, or add the MCP server manually: `hippo mcp`");
@@ -225,6 +299,7 @@ pub fn connect_claude(statusline: bool, pixel: bool) -> Result<Report> {
         mcp: connect_mcp()?,
         instructions: write_instructions()?,
         statusline: if statusline { connect_statusline(pixel)? } else { "skipped".into() },
+        file_access: connect_file_access()?,
     })
 }
 
@@ -233,6 +308,7 @@ pub fn disconnect_claude() -> Result<Report> {
         mcp: if claude_available() { disconnect_mcp() } else { "claude CLI not found".into() },
         instructions: remove_instructions()?,
         statusline: disconnect_statusline()?,
+        file_access: disconnect_file_access()?,
     })
 }
 

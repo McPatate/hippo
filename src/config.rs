@@ -41,6 +41,9 @@ pub struct GlobalConfig {
     /// The status line hippo wrapped in Claude Code settings, restored by `hippo disconnect claude`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claude_statusline_backup: Option<String>,
+    /// Claude Code deny rules hippo added (removed by `hippo disconnect claude`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_deny_added: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
