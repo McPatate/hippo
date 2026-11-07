@@ -939,7 +939,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         Cmd::Update => {
             let exe = std::env::current_exe()?.canonicalize()?;
             let dir = exe.parent().context("cannot locate the hippo binary")?;
-            let fetch = "if command -v gh >/dev/null && gh auth status >/dev/null 2>&1; then gh api repos/McPatate/hippo/contents/install.sh -H 'Accept: application/vnd.github.raw'; else curl -fsSL https://raw.githubusercontent.com/McPatate/hippo/main/install.sh; fi | sh";
+            let fetch = "curl -fsSL https://huggingface.co/buckets/mcpotato/hippo-releases/resolve/install.sh | sh";
             let ok = std::process::Command::new("sh").args(["-c", fetch]).env("HIPPO_INSTALL_DIR", dir).status()?.success();
             if !ok {
                 bail!("update failed\n  → Retry, or reinstall: cargo install --git https://github.com/McPatate/hippo");
