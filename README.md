@@ -3,9 +3,10 @@
 > Your AI memory as plain files you own, encrypted locally and backed up to a Hugging Face bucket, so every agent can use it and none can keep it.
 
 ```sh
-cargo install --git ssh://git@github.com/McPatate/hippo
+gh api repos/McPatate/hippo/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
 hippo init    # vault + key + private HF bucket + verified backup, connects Claude Code, imports its memories
 ```
+Prebuilt for macOS/Linux; `hippo update` upgrades. From source: `cargo install --git https://github.com/McPatate/hippo`.
 On a new machine, `hippo init` finds your vault in the bucket and restores it (put your key at `~/.hippo/key.txt` first).
 
 ## Why hippo?
