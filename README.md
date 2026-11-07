@@ -3,7 +3,7 @@
 Your AI memory as plain files you own, encrypted locally and backed up to a Hugging Face bucket, so every agent can use it and none can keep it.
 
 ```sh
-curl -fsSL https://mcpatate.github.io/hippo/install.sh | sh
+curl -fsSL hf.co/buckets/mcpotato/hippo-releases/resolve/install.sh | sh
 hippo init    # vault + key + private HF bucket + verified backup, connects Claude Code, imports its memories
 ```
 Prebuilt for macOS/Linux; `hippo update` upgrades. From source: `cargo install --git https://github.com/McPatate/hippo`.
