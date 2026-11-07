@@ -17,7 +17,7 @@ fn connect_and_disconnect_round_trip() {
     let calls = tmp.path().join("calls.log");
     // Fake `claude`: logs calls; `mcp get` succeeds (user scope) only after an `mcp add`.
     let script = format!(
-        "#!/bin/sh\necho \"$@\" >> {calls}\ncase \"$1 $2\" in\n  \"mcp add\") touch {added};;\n  \"mcp remove\") rm -f {added};;\n  \"mcp get\") [ -f {added} ] && echo 'Scope: User config' && exit 0; exit 1;;\nesac\nexit 0\n",
+        "#!/bin/sh\necho \"$@\" >> {calls}\ncase \"$1 $2\" in\n  \"mcp add\") echo \"Command: $7\" > {added};;\n  \"mcp remove\") rm -f {added};;\n  \"mcp get\") [ -f {added} ] && echo 'Scope: User config' && cat {added} && exit 0; exit 1;;\nesac\nexit 0\n",
         calls = calls.display(),
         added = tmp.path().join("added").display()
     );
