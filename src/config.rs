@@ -35,6 +35,16 @@ pub fn default_vault_path() -> PathBuf {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GlobalConfig {
     pub default_vault: Option<PathBuf>,
+    /// Your hippo buddy (statusline `--pixel`).
+    #[serde(default)]
+    pub buddy: Buddy,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct Buddy {
+    pub name: Option<String>,
+    /// lavender (default), pink, gray, blue
+    pub color: Option<String>,
 }
 
 impl GlobalConfig {

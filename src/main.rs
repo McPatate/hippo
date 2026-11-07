@@ -129,6 +129,22 @@ enum Cmd {
     },
     /// Forget hippo's Hugging Face sign-in (does not touch `hf auth login`)
     Logout,
+    /// One-line status for harnesses (Claude Code `statusLine`): last memory action + backup state
+    Statusline {
+        /// Run your existing status line command (gets the same stdin) and append hippo to its last line
+        #[arg(long)]
+        wrap: Option<String>,
+        #[arg(long, hide = true, env = "HIPPO_PIXEL")]
+        pixel: bool,
+    },
+    /// Meet your hippo buddy: name it, pick a color (shown by `statusline --pixel`)
+    Buddy {
+        #[arg(long)]
+        name: Option<String>,
+        /// lavender, pink, gray, blue
+        #[arg(long)]
+        color: Option<String>,
+    },
     /// Run the MCP server on stdio (Claude, ChatGPT desktop, Cursor…)
     Mcp,
     /// Show backup storage usage (pruning: human-only, not implemented yet)
@@ -416,6 +432,73 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let v = open_vault(cli)?;
             let s = backup::status(&v)?;
             out.done(status_json(&v, &s), || ui::status_text(&v, &s, ui::color()));
+            Ok(())
+        }
+        Cmd::Statusline { wrap, pixel } => {
+            // Harnesses pass session JSON on stdin: drain it, and forward it to a wrapped command.
+            let mut input = Vec::new();
+            if !std::io::stdin().is_terminal() {
+                let _ = std::io::stdin().read_to_end(&mut input);
+            }
+            let color = std::env::var_os("NO_COLOR").is_none();
+            let p = vault_path(cli).unwrap_or_else(|_| config::default_vault_path());
+            let now = chrono::Utc::now();
+            let theirs = wrap.as_ref().and_then(|cmd| {
+                let mut child = std::process::Command::new("sh")
+                    .args(["-c", cmd])
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .ok()?;
+                child.stdin.take()?.write_all(&input).ok()?;
+                let out = child.wait_with_output().ok()?;
+                let s = String::from_utf8_lossy(&out.stdout).trim_end().to_string();
+                (!s.is_empty()).then_some(s)
+            });
+            let Some(snap) = hippo::statusline::snapshot(&p) else {
+                println!("{}🦛 no vault · run `hippo init`", theirs.map(|t| format!("{t}  ")).unwrap_or_default());
+                return Ok(());
+            };
+            if *pixel {
+                // Their status line above, the buddy block below.
+                if let Some(t) = theirs {
+                    println!("{t}");
+                }
+                println!("{}", hippo::statusline::buddy(&snap, color, now));
+            } else {
+                // One row: their last line, then ours.
+                let ours = hippo::statusline::line(&snap, color, now);
+                match theirs {
+                    Some(t) => println!("{t}  {ours}"),
+                    None => println!("{ours}"),
+                }
+            }
+            Ok(())
+        }
+        Cmd::Buddy { name, color } => {
+            let mut gc = GlobalConfig::load()?;
+            if let Some(n) = name {
+                gc.buddy.name = (!n.is_empty()).then(|| n.clone());
+            }
+            if let Some(c) = color {
+                let c = c.to_lowercase();
+                if !["lavender", "pink", "gray", "grey", "blue"].contains(&c.as_str()) {
+                    bail!("color must be one of: lavender, pink, gray, blue");
+                }
+                gc.buddy.color = Some(c);
+            }
+            if name.is_some() || color.is_some() {
+                gc.save()?;
+            }
+            let shade = gc.buddy.color.clone().unwrap_or_else(|| "lavender".into());
+            out.done(json!({"name": gc.buddy.name, "color": shade}), || {
+                format!(
+                    "{}\n\n  name   {}\n  color  {shade}\n\n  Show it in Claude Code: \"statusLine\": {{\"type\": \"command\", \"command\": \"HIPPO_PIXEL=1 hippo statusline\", \"refreshInterval\": 1}}",
+                    hippo::statusline::sheet(&shade, ui::color()),
+                    gc.buddy.name.clone().unwrap_or_else(|| "hippo (set one with --name)".into())
+                )
+            });
             Ok(())
         }
         Cmd::Log { n } => {

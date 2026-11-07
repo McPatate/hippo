@@ -20,6 +20,10 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 - **Any agent, no lock-in.** Claude, ChatGPT, local models: agents are replaceable clients over MCP.
 - **One small binary** (plus `git`). No runtime, no dependency tree pulled at install time.
 
+## Your key
+
+`~/.hippo/key.txt`, separate from the vault. **Nothing backs up the key for you yet: lose it and your backups are unreadable.** Copy it into a password manager or onto paper (`hippo key --reveal`, run by you).
+
 ## Commands
 
 | | |
@@ -35,7 +39,3 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 | `hippo mcp` | MCP server for agents |
 
 **Agent mode:** in an agent environment (`AI_AGENT`, `CLAUDECODE`, …) or with `--agent`, every command prints one JSON object, never prompts, and errors are `{"ok":false,"error","hint"}`. Destructive commands refuse to run from agents.
-
-## Your key
-
-`~/.hippo/key.txt`, separate from the vault. **Nothing backs up the key for you yet: lose it and your backups are unreadable.** Copy it into a password manager or onto paper (`hippo key --reveal`, run by you).

@@ -15,6 +15,7 @@ pub mod remote;
 pub mod safety;
 pub mod secrets;
 pub mod state;
+pub mod statusline;
 pub mod ui;
 pub mod util;
 pub mod vault;

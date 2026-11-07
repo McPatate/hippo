@@ -29,6 +29,7 @@ It is a folder of Markdown files the user owns, encrypted and backed up by hippo
 - Use `remember` to save durable facts about the user, their preferences, projects and feedback \
 (one fact or topic per memory, short kebab-case names, update an existing memory instead of duplicating).\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
+- After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
 - If a response starts with `⚠️ MEMORY MERGE CONFLICT`, resolve it with `resolve_conflict` before \
 continuing: keep information from both sides when they are compatible; if they genuinely disagree, \
 ask the user which version is right.";
@@ -122,21 +123,29 @@ impl HippoServer {
         Vault::open(&self.vault_path).map_err(err)
     }
 
-    /// Prefix a response with a conflict notice when needed.
-    fn reply(&self, vault: &Vault, text: String) -> Result<CallToolResult, McpError> {
+    /// Every reply starts with a one-line receipt (`🦛 hippo …`): harnesses keep it visible in the
+    /// transcript after the call collapses. Then the conflict notice (if any), then the body.
+    fn reply(&self, vault: &Vault, receipt: String, body: String) -> Result<CallToolResult, McpError> {
         let conflicts = vault.unresolved_conflicts().map_err(err)?;
-        let text = if conflicts.is_empty() {
-            text
-        } else {
-            format!(
-                "⚠️ MEMORY MERGE CONFLICT — resolving memory device merge conflict…\n\
+        let mut text = format!("🦛 hippo {receipt}");
+        if !conflicts.is_empty() {
+            text += &format!(
+                "\n\n⚠️ MEMORY MERGE CONFLICT — resolving memory device merge conflict…\n\
                  Two devices changed the same memories. Conflicted files: {}.\n\
                  Read each file (it contains <<<<<<< / ||||||| / ======= / >>>>>>> sections), then call \
-                 `resolve_conflict` with the merged content. If the versions genuinely disagree, ask the user.\n\n{text}",
+                 `resolve_conflict` with the merged content. If the versions genuinely disagree, ask the user.",
                 conflicts.join(", ")
-            )
-        };
+            );
+        }
+        if !body.is_empty() {
+            text += "\n\n";
+            text += &body;
+        }
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    fn backup_note(&self, vault: &Vault) -> &'static str {
+        if vault.config.remote.is_some() { "encrypted backup queued" } else { "local only (no backup configured)" }
     }
 
     /// Run a backup in the background; coalesce bursts of writes into at most one extra run.
@@ -170,7 +179,11 @@ impl HippoServer {
         });
     }
 
-    #[tool(description = "Save or update a memory about the user. Reusing a name replaces that memory (history is kept).")]
+    #[tool(
+        title = "🦛 Remember",
+        description = "Save or update a memory about the user. Reusing a name replaces that memory (history is kept).",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn remember(&self, Parameters(a): Parameters<RememberArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let kind = a.kind.unwrap_or_else(|| "note".into());
@@ -178,6 +191,7 @@ impl HippoServer {
             return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
         }
         let existing = vault.read_memory(&a.name).ok();
+        let updated = existing.is_some();
         let m = Memory {
             name: a.name.clone(),
             description: a.description.or(existing.as_ref().map(|e| e.description.clone())).unwrap_or_default(),
@@ -188,23 +202,37 @@ impl HippoServer {
         };
         reject_secrets(&m.render())?;
         let commit = vault.remember(&m).map_err(err)?;
-        self.schedule_backup();
-        let path = vault.memory_path(&m.name);
-        let msg = match commit {
-            Some(c) => format!("Saved {} ({})", path.strip_prefix(&vault.root).unwrap().display(), &c[..8]),
-            None => "Unchanged (identical content already saved).".into(),
+        let name = crate::memory::slugify(&m.name);
+        let receipt = match &commit {
+            Some(c) => {
+                self.schedule_backup();
+                let what = if m.description.is_empty() { String::new() } else { format!(" — {}", m.description) };
+                format!(
+                    "{} `{name}` [{}]{what} · {} · {}",
+                    if updated { "updated" } else { "remembered" },
+                    m.kind,
+                    &c[..8],
+                    self.backup_note(&vault)
+                )
+            }
+            None => format!("already knew `{name}` (unchanged)"),
         };
-        self.reply(&vault, msg)
+        self.reply(&vault, receipt, String::new())
     }
 
-    #[tool(description = "Read one memory by name.")]
+    #[tool(title = "🦛 Recall", description = "Read one memory by name.", annotations(read_only_hint = true, open_world_hint = false))]
     async fn recall(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let m = vault.read_memory(&a.name).map_err(err)?;
-        self.reply(&vault, m.render())
+        crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name}));
+        self.reply(&vault, format!("recalled `{}`", m.name), m.render())
     }
 
-    #[tool(description = "List memories (name, type, description). Optionally filter by type.")]
+    #[tool(
+        title = "🦛 List memories",
+        description = "List memories (name, type, description). Optionally filter by type.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn list_memories(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let list = vault.list().map_err(err)?;
@@ -213,38 +241,56 @@ impl HippoServer {
             .filter(|m| a.kind.as_ref().is_none_or(|k| &m.kind == k))
             .map(|m| format!("- {} [{}] {}", m.name, m.kind, m.description))
             .collect();
-        let text = if lines.is_empty() { "No memories yet.".into() } else { lines.join("\n") };
-        self.reply(&vault, text)
+        let filter = a.kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
+        self.reply(&vault, format!("listed {} memories{filter}", lines.len()), lines.join("\n"))
     }
 
-    #[tool(description = "Full-text search over all memories. Returns names and matching snippets.")]
+    #[tool(
+        title = "🦛 Search memories",
+        description = "Full-text search over all memories. Returns names and matching snippets.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn search_memories(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let mut idx = Index::open(&vault.root).map_err(err)?;
         idx.refresh(&vault.memories_dir()).map_err(err)?;
         let hits = idx.search(&a.query, a.limit.unwrap_or(10)).map_err(err)?;
-        let text = if hits.is_empty() {
-            format!("No memories match `{}`.", a.query)
-        } else {
-            hits.iter()
-                .map(|h| format!("- {} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")))
-                .collect::<Vec<_>>()
-                .join("\n")
+        let names: Vec<&str> = hits.iter().take(3).map(|h| h.name.as_str()).collect();
+        crate::log::record(&vault.root, "search", serde_json::json!({"query": &a.query, "hits": hits.len()}));
+        let receipt = match hits.len() {
+            0 => format!("searched “{}” → no matches", a.query),
+            n => format!("searched “{}” → {n} match(es): {}{}", a.query, names.join(", "), if n > 3 { ", …" } else { "" }),
         };
-        self.reply(&vault, text)
+        let body = hits
+            .iter()
+            .map(|h| format!("- {} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        self.reply(&vault, receipt, body)
     }
 
-    #[tool(description = "Remove a memory from the vault. It stays in local history and existing backups.")]
+    #[tool(
+        title = "🦛 Forget",
+        description = "Remove a memory from the vault. It stays in local history and existing backups.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
     async fn forget(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let removed = vault.forget(&a.name).map_err(err)?;
-        if removed {
+        let receipt = if removed {
             self.schedule_backup();
-        }
-        self.reply(&vault, if removed { format!("Forgot `{}`.", a.name) } else { format!("No memory named `{}`.", a.name) })
+            format!("forgot `{}` · still in history · {}", a.name, self.backup_note(&vault))
+        } else {
+            format!("no memory named `{}`", a.name)
+        };
+        self.reply(&vault, receipt, String::new())
     }
 
-    #[tool(description = "Resolve a memory merge conflict by writing the final content of a conflicted file.")]
+    #[tool(
+        title = "🦛 Resolve memory conflict",
+        description = "Resolve a memory merge conflict by writing the final content of a conflicted file.",
+        annotations(read_only_hint = false, destructive_hint = false, open_world_hint = false)
+    )]
     async fn resolve_conflict(&self, Parameters(a): Parameters<ResolveArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let conflicts = vault.unresolved_conflicts().map_err(err)?;
@@ -261,21 +307,29 @@ impl HippoServer {
         let path = vault.root.join(&a.path);
         crate::util::atomic_write(&path, a.content.as_bytes()).map_err(err)?;
         let remaining = vault.unresolved_conflicts().map_err(err)?;
-        let text = if remaining.is_empty() {
+        let receipt = if remaining.is_empty() {
             vault.save("resolve memory merge").map_err(err)?;
             self.schedule_backup();
-            "All conflicts resolved and saved.".to_string()
+            format!("resolved `{}` · all conflicts resolved · {}", a.path, self.backup_note(&vault))
         } else {
-            format!("Resolved {}. Still conflicted: {}", a.path, remaining.join(", "))
+            format!("resolved `{}` · still conflicted: {}", a.path, remaining.join(", "))
         };
-        self.reply(&vault, text)
+        self.reply(&vault, receipt, String::new())
     }
 
-    #[tool(description = "Backup status of the memory vault: local changes, last upload, last verified recovery point.")]
+    #[tool(
+        title = "🦛 Memory status",
+        description = "Backup status of the memory vault: local changes, last upload, last verified recovery point.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
     async fn memory_status(&self) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let s = backup::status(&vault).map_err(err)?;
-        self.reply(&vault, crate::ui::status_text(&vault, &s, false))
+        let receipt = match s.state.verified_at {
+            Some(t) => format!("status · last verified backup #{} {}", s.state.verified_seq, crate::util::ago(t)),
+            None => "status · no verified backup yet".into(),
+        };
+        self.reply(&vault, receipt, crate::ui::status_text(&vault, &s, false))
     }
 }
 
