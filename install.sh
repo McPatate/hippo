@@ -1,7 +1,6 @@
 #!/bin/sh
 # Install or update hippo from GitHub releases.
-#   private repo: gh api repos/McPatate/hippo/contents/install.sh -H 'Accept: application/vnd.github.raw' | sh
-#   public repo:  curl -fsSL https://raw.githubusercontent.com/McPatate/hippo/main/install.sh | sh
+#   curl -fsSL https://mcpatate.github.io/hippo/install.sh | sh
 set -eu
 REPO=McPatate/hippo
 DIR=${HIPPO_INSTALL_DIR:-$HOME/.local/bin}
