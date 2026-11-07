@@ -263,6 +263,27 @@ fn connect_file_access() -> Result<String> {
             gc.claude_deny_added.push(rule);
         }
     }
+    // OS-level too, once the user enables Claude Code's sandbox (`/sandbox`).
+    let deny_read = obj
+        .entry("sandbox")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("sandbox is not an object")?
+        .entry("filesystem")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("sandbox.filesystem is not an object")?
+        .entry("denyRead")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .context("sandbox.filesystem.denyRead is not a list")?;
+    for p in guarded_paths() {
+        let p = p.strip_prefix('/').filter(|q| q.starts_with('/')).map(str::to_string).unwrap_or(p); // `//abs` is rule syntax only
+        if !deny_read.iter().any(|r| r.as_str() == Some(&p)) {
+            deny_read.push(json!(p));
+            gc.claude_sandbox_added.push(p);
+        }
+    }
     save_settings(&settings)?;
     gc.save()?;
     Ok("Claude's file tools denied on hippo's files (enable `/sandbox` to also stop scripts)".into())
@@ -270,7 +291,7 @@ fn connect_file_access() -> Result<String> {
 
 fn disconnect_file_access() -> Result<String> {
     let mut gc = crate::config::GlobalConfig::load()?;
-    if gc.claude_deny_added.is_empty() {
+    if gc.claude_deny_added.is_empty() && gc.claude_sandbox_added.is_empty() {
         return Ok("untouched".into());
     }
     let mut settings = load_settings()?;
@@ -285,8 +306,26 @@ fn disconnect_file_access() -> Result<String> {
             settings.as_object_mut().unwrap().remove("permissions");
         }
     }
+    let ours = &gc.claude_sandbox_added;
+    if let Some(sb) = settings.get_mut("sandbox").and_then(Value::as_object_mut) {
+        if let Some(fs) = sb.get_mut("filesystem").and_then(Value::as_object_mut) {
+            if let Some(dr) = fs.get_mut("denyRead").and_then(Value::as_array_mut) {
+                dr.retain(|r| !r.as_str().is_some_and(|r| ours.iter().any(|a| a == r)));
+                if dr.is_empty() {
+                    fs.remove("denyRead");
+                }
+            }
+            if fs.is_empty() {
+                sb.remove("filesystem");
+            }
+        }
+        if sb.is_empty() {
+            settings.as_object_mut().unwrap().remove("sandbox");
+        }
+    }
     save_settings(&settings)?;
     gc.claude_deny_added.clear();
+    gc.claude_sandbox_added.clear();
     gc.save()?;
     Ok("deny rules removed".into())
 }

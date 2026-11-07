@@ -44,6 +44,9 @@ pub struct GlobalConfig {
     /// Claude Code deny rules hippo added (removed by `hippo disconnect claude`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub claude_deny_added: Vec<String>,
+    /// Paths hippo added to Claude Code's `sandbox.filesystem.denyRead`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_sandbox_added: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

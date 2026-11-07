@@ -61,7 +61,9 @@ fn connect_and_disconnect_round_trip() {
     assert!(cmd.contains("statusline --wrap 'echo '\\''my line'\\'''"), "{cmd}");
     assert_eq!(s["statusLine"]["padding"], 1);
     let keys: Vec<&String> = s.as_object().unwrap().keys().collect();
-    assert_eq!(keys, ["model", "permissions", "statusLine", "theme"], "key order preserved");
+    assert_eq!(keys, ["model", "permissions", "statusLine", "theme", "sandbox"], "key order preserved");
+    let dr = s["sandbox"]["filesystem"]["denyRead"][0].as_str().unwrap();
+    assert!(dr.ends_with("hippo-home") && !dr.starts_with("//"), "{dr}");
     let deny: Vec<&str> = s["permissions"]["deny"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();
     assert_eq!(deny[0], "Bash(rm -rf:*)", "user rule kept first");
     assert!(deny.iter().any(|r| r.starts_with("Read(//") && r.ends_with("hippo-home/**)")), "{deny:?}");
