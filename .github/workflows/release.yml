@@ -2,8 +2,13 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag: { description: "existing tag to (re)build", required: true }
 permissions:
   contents: write
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 jobs:
   build:
     strategy:
@@ -16,6 +21,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with: { ref: "${{ env.TAG }}" }
       - run: rustup target add ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: package
@@ -25,5 +31,5 @@ jobs:
           shasum -a 256 $a > $a.sha256
       - env: { GH_TOKEN: "${{ github.token }}" }
         run: |
-          gh release view ${{ github.ref_name }} || gh release create ${{ github.ref_name }} --generate-notes || true
-          gh release upload ${{ github.ref_name }} hippo-*.tar.gz* --clobber
+          gh release view "$TAG" -R ${{ github.repository }} || gh release create "$TAG" -R ${{ github.repository }} --generate-notes || true
+          gh release upload "$TAG" -R ${{ github.repository }} hippo-*.tar.gz* --clobber
