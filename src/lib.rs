@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod backup;
+pub mod cleanup;
 pub mod config;
 pub mod connect;
 pub mod crypto;
