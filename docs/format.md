@@ -20,9 +20,15 @@ name: prefers-rust          # slug, = file stem
 description: one line
 type: user | feedback | project | reference | note
 tags: a, b
+visibility: all | private | project:<path or folder name>   # who may read it (default all)
+by: user | <agent>          # who wrote this version
+updated: 2026-11-09T12:00:00Z
+status: draft | forget      # an agent change the user hasn't reviewed (absent = confirmed)
 ---
 Body (Markdown).
 ```
+
+Agent writes are drafts until the user approves them (`hippo review`). Rejecting restores the last version without `status`; an agent's `forget` hides the memory from agents until the user approves the removal.
 
 ## Key
 

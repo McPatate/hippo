@@ -18,6 +18,7 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 - **Verified checkpoints.** A backup only counts once it has been read back and checked. hippo always shows whether your latest changes are local, uploaded, or verified recoverable.
 - **Recover without hippo.** Backups are standard age-encrypted git bundles: `hf buckets cp` + `age -d` + `git fetch` rebuilds your vault ([format](docs/format.md)).
 - **Multi-device without silent data loss.** Devices merge through git. Conflicts are kept, never dropped, and reported to your agent so it can resolve them or ask you.
+- **You approve what agents remember.** Agent writes are drafts until you review the diff, and every memory says who wrote it and when. Ask your agent for 🧹 cleanup (the `cleanup` prompt) to merge duplicates and fix stale notes together.
 - **Any agent, no lock-in.** Claude, ChatGPT, local models: agents are replaceable clients over MCP.
 - **One small binary** (plus `git`). No runtime, no dependency tree pulled at install time.
 
@@ -32,6 +33,7 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 | `hippo` / `hippo status` | local · uploaded · verified, at a glance |
 | `hippo add <name> [-m …] [-t user\|feedback\|project\|reference\|note]` | save a memory (stdin / `$EDITOR` work too) |
 | `hippo ls`, `show`, `search`, `rm` | browse |
+| `hippo review` | approve or reject what agents changed (their writes are drafts until you do) |
 | `hippo save` | commit edits made directly to the files |
 | `hippo backup` · `hippo sync` | back up · pull other devices, merge, back up |
 | `hippo restore <user>/<bucket>` | new machine: rebuild from backup + key |
