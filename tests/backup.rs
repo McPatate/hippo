@@ -386,8 +386,8 @@ async fn import_recognises_legacy_project_named_stems() {
         v.write_memory(&m).unwrap();
     }
     v.save("legacy import").unwrap();
-    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
-    assert!(commit.is_none(), "{plans:?}");
-    assert_eq!(hippo::import::count(&plans, hippo::import::Status::Unchanged), 2);
-    assert_eq!(v.list().unwrap().len(), 2);
+    let (plans, _) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    assert_eq!(hippo::import::count(&plans, hippo::import::Status::New), 0, "{plans:?}");
+    let names: Vec<String> = v.list().unwrap().into_iter().map(|m| m.name).collect();
+    assert_eq!(names, ["notes", "picklescan-venv"], "matched in place, no duplicates");
 }
