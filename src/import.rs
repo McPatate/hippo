@@ -2,6 +2,7 @@
 //! Re-running an import is safe: already-imported memories are skipped, changed ones updated.
 
 use crate::memory::{KINDS, Memory, slugify};
+use crate::project::{Ident, Registry};
 use crate::vault::Vault;
 use anyhow::{Context, Result};
 use std::collections::{BTreeMap, HashMap};
@@ -71,14 +72,16 @@ fn resolve_dir(slug: &str) -> Option<PathBuf> {
 }
 
 /// Preferences follow you everywhere; everything else stays in the project Claude scoped it to.
-fn default_scope(kind: &str, slug: &str, short: &str) -> Option<String> {
-    match kind {
-        "user" | "feedback" => None,
-        _ => Some(match resolve_dir(slug) {
-            Some(p) => format!("project:{}", p.display()),
-            None => format!("project:{short}"),
-        }),
-    }
+fn default_scope(reg: &mut Registry, kind: &str, slug: &str, short: &str) -> Option<String> {
+    let key = match (kind, resolve_dir(slug)) {
+        ("user" | "feedback", _) => return None,
+        (_, Some(dir)) => reg.key_for(&Ident::of(&dir)),
+        (_, None) => {
+            reg.projects.entry(short.to_string()).or_default();
+            short.to_string()
+        }
+    };
+    Some(format!("project:{key}"))
 }
 
 fn sources(from: &Path) -> Result<Vec<(String, PathBuf)>> {
@@ -142,6 +145,7 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
     let mut plans = vec![];
     let mut memories = vec![];
     let mut renames: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
+    let mut reg = Registry::load(&vault.root);
 
     for (slug, path) in sources(from)? {
         let text = std::fs::read_to_string(&path)?;
@@ -172,7 +176,7 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
         }
         let prior = imported.get(&(slug.clone(), slugify(&stem)));
         // Keep a visibility already set (by the user or a previous import); else Claude's scope.
-        let scope = prior.and_then(|p| p.extra.get("visibility").cloned()).or_else(|| default_scope(&m.kind, &slug, &project));
+        let scope = prior.and_then(|p| p.extra.get("visibility").cloned()).or_else(|| default_scope(&mut reg, &m.kind, &slug, &project));
         if let Some(v) = scope {
             m.extra.insert("visibility".into(), v);
         }
@@ -214,6 +218,7 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
         return Ok((plans, None));
     }
     let _lock = vault.lock()?;
+    reg.save(&vault.root)?;
     for ((_, m, _), p) in memories.iter().zip(&plans) {
         if p.status != Status::Unchanged {
             vault.write_memory(m)?;
