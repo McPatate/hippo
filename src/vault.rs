@@ -307,6 +307,13 @@ impl Vault {
         self.commit_one_locked(&self.rel(&path), &format!("reject: {}", slugify(name)))
     }
 
+    /// Write and commit the project registry.
+    pub fn save_registry(&self, reg: &crate::project::Registry, message: &str) -> Result<Option<String>> {
+        let _lock = self.lock()?;
+        reg.save(&self.root)?;
+        self.commit_one_locked(crate::project::FILE, message)
+    }
+
     /// When the memory was last committed (for files without an `updated` field).
     pub fn last_changed(&self, name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
         let rel = self.rel(&self.memory_path(name));

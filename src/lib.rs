@@ -11,6 +11,7 @@ pub mod git;
 pub mod import;
 pub mod index;
 pub mod mcp;
+pub mod project;
 pub mod log;
 pub mod memory;
 pub mod remote;
