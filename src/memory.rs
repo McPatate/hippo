@@ -130,6 +130,73 @@ impl Memory {
     }
 }
 
+/// Provenance lives in the file so it travels with it: who last changed a memory (`by`), when
+/// (`updated`), and `status` while the user hasn't reviewed an agent's change yet
+/// (`draft`: new or edited, `forget`: the agent asked to remove it).
+const PROVENANCE: &[&str] = &["by", "updated", "status"];
+
+impl Memory {
+    pub fn status(&self) -> Option<&str> {
+        self.extra.get("status").map(String::as_str)
+    }
+
+    pub fn needs_review(&self) -> bool {
+        self.status().is_some()
+    }
+
+    pub fn updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        self.extra.get("updated").and_then(|t| t.parse().ok())
+    }
+
+    /// Same memory, ignoring provenance?
+    pub fn same_content(&self, other: &Memory) -> bool {
+        let strip = |m: &Memory| {
+            let mut m = m.clone();
+            m.extra.retain(|k, _| !PROVENANCE.contains(&k.as_str()));
+            m
+        };
+        strip(self) == strip(other)
+    }
+
+    /// Record who wrote this version. Agent writes are drafts until the user approves them;
+    /// rewriting identical content keeps the previous provenance.
+    pub fn stamp(&mut self, prev: Option<&Memory>, agent: Option<&str>) {
+        if let Some(p) = prev.filter(|p| p.same_content(self)) {
+            for k in PROVENANCE {
+                match p.extra.get(*k) {
+                    Some(v) => self.extra.insert(k.to_string(), v.clone()),
+                    None => self.extra.remove(*k),
+                };
+            }
+            return;
+        }
+        self.extra.insert("by".into(), agent.unwrap_or("user").into());
+        self.extra.insert("updated".into(), chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        match agent {
+            Some(_) => self.extra.insert("status".into(), "draft".into()),
+            None => self.extra.remove("status"),
+        };
+    }
+
+    /// "unconfirmed, by claude-code, 12 days ago". `fallback` is the time from history when the
+    /// file has no `updated`.
+    pub fn provenance(&self, fallback: Option<chrono::DateTime<chrono::Utc>>) -> String {
+        let mut parts = vec![];
+        match self.status() {
+            Some("forget") => parts.push("removal pending your review".to_string()),
+            Some(_) => parts.push("unconfirmed".to_string()),
+            None => {}
+        }
+        if let Some(by) = self.extra.get("by") {
+            parts.push(format!("by {by}"));
+        }
+        if let Some(t) = self.updated().or(fallback) {
+            parts.push(crate::util::ago(t));
+        }
+        parts.join(", ")
+    }
+}
+
 /// Turn a free-form name into a safe file stem: lowercase, `[a-z0-9-]`, no path tricks.
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -188,6 +255,20 @@ mod tests {
         assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/safetensors-old")]));
         m.extra.insert("visibility".into(), "private".into());
         assert!(!m.visible_in(&here));
+    }
+
+    #[test]
+    fn agent_writes_are_drafts() {
+        let mut m = Memory { name: "x".into(), body: "a".into(), ..Default::default() };
+        m.stamp(None, Some("claude-code"));
+        assert_eq!((m.status(), m.extra["by"].as_str()), (Some("draft"), "claude-code"));
+        let mut same = Memory { name: "x".into(), body: "a".into(), ..Default::default() };
+        same.stamp(Some(&m), None);
+        assert_eq!(same, m, "unchanged content keeps provenance");
+        let mut edit = Memory { name: "x".into(), body: "b".into(), ..Default::default() };
+        edit.stamp(Some(&m), None);
+        assert_eq!((edit.status(), edit.extra["by"].as_str()), (None, "user"));
+        assert!(edit.provenance(None).starts_with("by user, "));
     }
 
     #[test]
