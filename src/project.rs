@@ -6,7 +6,7 @@
 //! folders that aren't repos). Whenever one matches, the others are learned, so it self-heals
 //! after a `mv`.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -71,8 +71,40 @@ impl Ident {
 }
 
 impl Registry {
-    pub fn load(vault: &Path) -> Registry {
-        std::fs::read_to_string(vault.join(FILE)).ok().and_then(|t| toml::from_str(&t).ok()).unwrap_or_default()
+    /// Fails on an unreadable file rather than starting over, which would drop every link.
+    pub fn load(vault: &Path) -> Result<Registry> {
+        match std::fs::read_to_string(vault.join(FILE)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
+            Err(e) => Err(e.into()),
+            Ok(t) => toml::from_str(&t)
+                .with_context(|| format!("{FILE} in your vault is unreadable (an unresolved merge?)\n  → Fix it by hand, then retry")),
+        }
+    }
+
+    /// Fold in what another copy learned (e.g. one loaded before a long import).
+    pub fn merge(&mut self, other: &Registry) {
+        for (k, o) in &other.projects {
+            let p = self.projects.entry(k.clone()).or_default();
+            for r in &o.roots {
+                if !p.roots.contains(r) {
+                    p.roots.push(r.clone());
+                }
+            }
+            for q in &o.paths {
+                if !p.paths.contains(q) {
+                    p.paths.push(q.clone());
+                }
+            }
+        }
+    }
+
+    /// Matches `id` by root commit or by its exact folder (not just a parent folder), or has no
+    /// matcher at all yet: safe to learn `id`'s identities into it.
+    fn owns(&self, key: &str, id: &Ident) -> bool {
+        let home = id.home().to_string_lossy();
+        self.projects.get(key).is_some_and(|p| {
+            p.roots.iter().any(|r| id.roots.contains(r)) || p.paths.iter().any(|q| *q == home) || (p.roots.is_empty() && p.paths.is_empty())
+        })
     }
 
     pub fn save(&self, vault: &Path) -> Result<()> {
@@ -145,16 +177,27 @@ impl Scope {
             eprintln!("hippo: could not migrate project scopes: {e:#}");
         }
         let id = Ident::of(dir);
-        let mut reg = Registry::load(&vault.root);
+        let reg = match Registry::load(&vault.root) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("hippo: {e:#}");
+                return Scope { dir: id.dir, keys: vec![] }; // fail closed: no project memories
+            }
+        };
         let mut keys = reg.resolve(&id);
         // A folder named like a project nobody has linked yet (an old `project:<name>`): adopt it.
         let name = id.suggested_key();
         if keys.is_empty() && reg.projects.get(&name).is_some_and(|p| p.roots.is_empty() && p.paths.is_empty()) {
             keys.push(name);
         }
-        let changed = keys.iter().fold(false, |c, k| reg.learn(k, &id) | c);
-        if changed {
-            let _ = vault.save_registry(&reg, "projects: learn where they live");
+        // Learn a moved repo's new path, or a folder's first commit. A folder that only sits
+        // inside a project's path is not learned: it may be a different project.
+        let learn = |reg: &mut Registry| {
+            let owned: Vec<&String> = keys.iter().filter(|k| reg.owns(k, &id)).collect();
+            owned.into_iter().fold(false, |c, k| reg.learn(k, &id) | c)
+        };
+        if learn(&mut reg.clone()) {
+            let _ = vault.update_registry("projects: learn where they live", learn);
         }
         Scope { dir: id.dir, keys }
     }
@@ -169,16 +212,29 @@ impl Scope {
 /// Returns how many memories changed.
 pub fn migrate(vault: &crate::vault::Vault) -> Result<usize> {
     use crate::memory::{Visibility, slugify};
+    let marker = vault.meta_dir().join("projects-migrated");
+    if marker.exists() {
+        return Ok(0);
+    }
     let _lock = vault.lock()?;
-    let mut reg = Registry::load(&vault.root);
-    let mut changed = 0;
+    let before = Registry::load(&vault.root)?;
+    let mut reg = before.clone();
+    let mut changed = vec![];
     for mut m in vault.list()? {
         let Visibility::Project(p) = m.visibility() else { continue };
         let key = if p.starts_with('/') && Path::new(&p).exists() {
             reg.key_for(&Ident::of(Path::new(&p)))
         } else if p.starts_with('/') {
-            // Gone from this disk (moved, or another device's path): keep it as a path matcher.
-            let key = slugify(Path::new(&p).file_name().map(|n| n.to_string_lossy()).unwrap_or_default().as_ref());
+            // Gone from this disk (moved, or another device's path): keep it as a path matcher,
+            // under its own key if a live project already has that name.
+            let base = slugify(Path::new(&p).file_name().map(|n| n.to_string_lossy()).unwrap_or_default().as_ref());
+            let mut key = base.clone();
+            for i in 2.. {
+                match reg.projects.get(&key) {
+                    Some(q) if !q.roots.is_empty() || q.paths.iter().any(|q| Path::new(q).exists()) => key = format!("{base}-{i}"),
+                    _ => break,
+                }
+            }
             let e = reg.projects.entry(key.clone()).or_default();
             if !e.paths.contains(&p) {
                 e.paths.push(p.clone());
@@ -191,15 +247,17 @@ pub fn migrate(vault: &crate::vault::Vault) -> Result<usize> {
         };
         if key != p {
             m.extra.insert("visibility".into(), format!("project:{key}"));
-            vault.write_memory(&m)?;
-            changed += 1;
+            let path = vault.write_memory(&m)?;
+            changed.push(path.strip_prefix(&vault.root)?.to_string_lossy().to_string());
         }
     }
-    if changed > 0 || reg != Registry::load(&vault.root) {
+    if !changed.is_empty() || reg != before {
         reg.save(&vault.root)?;
-        vault.save_locked("projects: scope memories by project key")?;
+        changed.push(FILE.into());
+        vault.commit_paths_locked(&changed, "projects: scope memories by project key")?;
     }
-    Ok(changed)
+    std::fs::write(&marker, "")?;
+    Ok(changed.len().saturating_sub(1))
 }
 
 #[cfg(test)]

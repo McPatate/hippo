@@ -205,12 +205,16 @@ impl Vault {
         Ok(commit)
     }
 
-    /// Commit only `rel` (fast in-process path); full `save_locked` during a device merge.
     fn commit_one_locked(&self, rel: &str, message: &str) -> Result<Option<String>> {
+        self.commit_paths_locked(&[rel.to_string()], message)
+    }
+
+    /// Commit only `rels` (fast in-process path); full `save_locked` during a device merge.
+    pub(crate) fn commit_paths_locked(&self, rels: &[String], message: &str) -> Result<Option<String>> {
         if self.git.merge_in_progress() {
             return self.save_locked(message);
         }
-        let commit = self.git.commit_paths(&[rel.to_string()], &crate::safety::with_agent_trailer(message))?;
+        let commit = self.git.commit_paths(rels, &crate::safety::with_agent_trailer(message))?;
         if let Some(c) = &commit {
             crate::log::record(&self.root, "commit", serde_json::json!({"message": message, "commit": &c[..12]}));
         }
@@ -309,11 +313,17 @@ impl Vault {
         self.commit_one_locked(&self.rel(&path), &format!("reject: {}", slugify(name)))
     }
 
-    /// Write and commit the project registry.
-    pub fn save_registry(&self, reg: &crate::project::Registry, message: &str) -> Result<Option<String>> {
+    /// Change the project registry under the vault lock (load, `f`, save and commit if changed).
+    pub fn update_registry<T>(&self, message: &str, f: impl FnOnce(&mut crate::project::Registry) -> T) -> Result<T> {
         let _lock = self.lock()?;
-        reg.save(&self.root)?;
-        self.commit_one_locked(crate::project::FILE, message)
+        let before = crate::project::Registry::load(&self.root)?;
+        let mut reg = before.clone();
+        let out = f(&mut reg);
+        if reg != before {
+            reg.save(&self.root)?;
+            self.commit_one_locked(crate::project::FILE, message)?;
+        }
+        Ok(out)
     }
 
     /// When the memory was last committed (for files without an `updated` field).

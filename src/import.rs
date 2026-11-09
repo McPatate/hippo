@@ -145,7 +145,7 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
     let mut plans = vec![];
     let mut memories = vec![];
     let mut renames: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
-    let mut reg = Registry::load(&vault.root);
+    let mut reg = Registry::load(&vault.root)?;
 
     for (slug, path) in sources(from)? {
         let text = std::fs::read_to_string(&path)?;
@@ -218,7 +218,10 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
         return Ok((plans, None));
     }
     let _lock = vault.lock()?;
-    reg.save(&vault.root)?;
+    // Merge with the registry as it is now: it may have changed since the start of the import.
+    let mut fresh = Registry::load(&vault.root)?;
+    fresh.merge(&reg);
+    fresh.save(&vault.root)?;
     for ((_, m, _), p) in memories.iter().zip(&plans) {
         if p.status != Status::Unchanged {
             vault.write_memory(m)?;

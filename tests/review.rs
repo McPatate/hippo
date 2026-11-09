@@ -77,7 +77,7 @@ fn migrates_folder_scopes_to_project_keys() {
     scoped("dead", "project:bucket-memory");
     assert_eq!(migrate(&v).unwrap(), 1);
     assert_eq!(v.read_memory("abs").unwrap().extra["visibility"], "project:safetensors");
-    assert!(Registry::load(&v.root).projects["bucket-memory"].roots.is_empty(), "kept, unlinked");
+    assert!(Registry::load(&v.root).unwrap().projects["bucket-memory"].roots.is_empty(), "kept, unlinked");
 
     // The repo moves: still the same project.
     let moved = repo.with_file_name("st-renamed");
@@ -95,4 +95,24 @@ fn rewriting_the_same_memory_is_a_no_op() {
     v.remember(&m).unwrap();
     assert_eq!(v.remember_by(&m, AGENT).unwrap(), None, "approved memory stays approved");
     assert_eq!(v.read_memory("prefers-rust").unwrap().status(), None);
+}
+
+#[test]
+fn registry_is_never_overwritten_when_unreadable_or_learned_from_subfolders() {
+    use hippo::project::{FILE, Ident, Registry, Scope};
+    let (t, v) = vault();
+    let work = t.path().canonicalize().unwrap().join("work");
+    std::fs::create_dir_all(work.join("newrepo")).unwrap();
+    v.update_registry("link", |r| r.learn("work", &Ident::of(&work))).unwrap();
+
+    // A folder inside `work` is in `work`, but isn't added to it.
+    assert_eq!(Scope::here(&v, &work.join("newrepo")).keys, vec!["work"]);
+    assert_eq!(Registry::load(&v.root).unwrap().projects["work"].paths.len(), 1);
+
+    // An unreadable registry: no project scope (fail closed), and the file is left alone.
+    let conflicted = "<<<<<<< ours\n[projects.work]\n=======\n>>>>>>> theirs\n";
+    std::fs::write(v.root.join(FILE), conflicted).unwrap();
+    assert!(Scope::here(&v, &work).keys.is_empty());
+    assert!(v.update_registry("x", |_| ()).is_err());
+    assert_eq!(std::fs::read_to_string(v.root.join(FILE)).unwrap(), conflicted);
 }

@@ -157,25 +157,22 @@ impl HippoServer {
     /// folder name the first time. A key nobody uses yet is linked to this folder.
     fn project_key(&self, vault: &Vault, key: Option<&str>) -> anyhow::Result<String> {
         let mut scope = self.scope.write().unwrap();
-        let mut reg = crate::project::Registry::load(&vault.root);
-        let key = match key {
-            Some(k) => crate::memory::slugify(k),
-            None if !scope.keys.is_empty() => return Ok(scope.keys[0].clone()),
-            None => {
-                let base = crate::project::Ident::of(&scope.dir).suggested_key();
-                let mut k = base.clone();
-                for i in 2.. {
-                    if !reg.projects.contains_key(&k) {
-                        break;
-                    }
-                    k = format!("{base}-{i}");
+        if key.is_none() && !scope.keys.is_empty() {
+            return Ok(scope.keys[0].clone());
+        }
+        let id = crate::project::Ident::of(&scope.dir);
+        let (key, here) = vault.update_registry("projects: link a folder", |reg| match key {
+            Some(k) => {
+                let k = crate::memory::slugify(k);
+                let new = !reg.projects.contains_key(&k);
+                if new {
+                    reg.learn(&k, &id);
                 }
-                k
+                (k, new)
             }
-        };
-        if !reg.projects.contains_key(&key) {
-            reg.learn(&key, &crate::project::Ident::of(&scope.dir));
-            vault.save_registry(&reg, &format!("projects: add {key}"))?;
+            None => (reg.key_for(&id), true),
+        })?;
+        if here && !scope.keys.contains(&key) {
             scope.keys.push(key.clone());
         }
         Ok(key)

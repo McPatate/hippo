@@ -852,14 +852,12 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 }
                 let id = Ident::of(&dir.clone().map(|d| expand_tilde(&d.to_string_lossy())).unwrap_or(cwd));
                 let key = hippo::memory::slugify(key);
-                let mut reg = Registry::load(&v.root);
-                reg.learn(&key, &id);
-                v.save_registry(&reg, &format!("projects: link {} to {key}", id.home().display()))?;
+                v.update_registry(&format!("projects: link {} to {key}", id.home().display()), |reg| reg.learn(&key, &id))?;
                 out.done(json!({"linked": key, "dir": id.home()}), || format!("{} {} → {key}", green("✓"), pretty_path(id.home())));
                 return Ok(());
             }
             let here = Scope::here(&v, &cwd);
-            let reg = Registry::load(&v.root);
+            let reg = Registry::load(&v.root)?;
             let memories = v.list()?;
             let count = |k: &str| memories.iter().filter(|m| m.visibility() == hippo::memory::Visibility::Project(k.into())).count();
             let rows: Vec<_> = reg.projects.iter().filter(|(k, _)| out.sees_all() || here.keys.contains(k)).collect();
@@ -896,8 +894,14 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 return Ok(());
             }
             // Memories scoped to a project no folder matches: no agent can see them.
-            let reg = hippo::project::Registry::load(&v.root);
-            let unlinked: Vec<String> = reg.projects.iter().filter(|(_, p)| p.roots.is_empty() && p.paths.is_empty()).map(|(k, _)| k.clone()).collect();
+            // (Without a root commit or an existing folder, nothing on this machine can match.)
+            let reg = hippo::project::Registry::load(&v.root)?;
+            let unlinked: Vec<String> = reg
+                .projects
+                .iter()
+                .filter(|(_, p)| p.roots.is_empty() && !p.paths.iter().any(|q| std::path::Path::new(q).exists()))
+                .map(|(k, _)| k.clone())
+                .collect();
             let stranded = v.list()?.iter().filter(|m| matches!(m.visibility(), hippo::memory::Visibility::Project(k) if unlinked.contains(&k))).count();
             if stranded > 0 {
                 out.say(yellow(&format!(
