@@ -12,7 +12,13 @@ env:
   BUCKET: hf://buckets/mcpotato/hippo-releases
   HF_TOKEN: ${{ secrets.HF_TOKEN }}
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - env: { GH_TOKEN: "${{ github.token }}" }
+        run: gh release view "$TAG" -R ${{ github.repository }} || gh release create "$TAG" -R ${{ github.repository }} --draft --generate-notes
   build:
+    needs: prepare
     strategy:
       matrix:
         include:
@@ -32,9 +38,7 @@ jobs:
           tar -czf $a -C target/${{ matrix.target }}/release hippo
           shasum -a 256 $a > $a.sha256
       - env: { GH_TOKEN: "${{ github.token }}" }
-        run: |
-          gh release view "$TAG" -R ${{ github.repository }} || gh release create "$TAG" -R ${{ github.repository }} --draft --generate-notes || true
-          gh release upload "$TAG" -R ${{ github.repository }} hippo-*.tar.gz* --clobber
+        run: gh release upload "$TAG" -R ${{ github.repository }} hippo-*.tar.gz* --clobber
       - uses: astral-sh/setup-uv@v6
       - name: mirror to HF bucket
         run: |
