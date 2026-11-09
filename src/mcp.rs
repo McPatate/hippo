@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const INSTRUCTIONS: &str = "hippo is the user's personal, private, long-term memory. \
 It is a folder of Markdown files the user owns, encrypted and backed up by hippo.\n\
-- Call `search_memories` / `list_memories` at the start of a task when personal context could help.\n\
+- Call `search_memories` / `list_memories` at the start of a task when personal context could help. \
+They return names and descriptions; `recall` only what you actually need.\n\
 - Use `remember` to save durable facts about the user, their preferences, projects and feedback \
 (one fact or topic per memory, short kebab-case names, update an existing memory instead of duplicating).\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
@@ -302,9 +303,13 @@ impl HippoServer {
             0 => format!("searched “{}” → no matches", a.query),
             n => format!("searched “{}” → {n} match(es): {}{}", a.query, names.join(", "), if n > 3 { ", …" } else { "" }),
         };
+        let snippets = crate::config::GlobalConfig::load().is_ok_and(|g| g.search_snippets);
         let body = hits
             .iter()
-            .map(|h| format!("- {} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")))
+            .map(|h| match snippets {
+                true => format!("- {} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")),
+                false => format!("- {} — {}", h.name, h.description),
+            })
             .collect::<Vec<_>>()
             .join("\n");
         self.reply(&vault, receipt, body)

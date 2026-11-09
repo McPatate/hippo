@@ -35,6 +35,10 @@ pub fn default_vault_path() -> PathBuf {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GlobalConfig {
     pub default_vault: Option<PathBuf>,
+    /// Privacy mode is the default: search shows agents names + descriptions only, and memory
+    /// text leaves hippo only on an explicit `recall`. `true` adds matching snippets to search.
+    #[serde(default)]
+    pub search_snippets: bool,
     /// Your hippo buddy (statusline `--pixel`).
     #[serde(default)]
     pub buddy: Buddy,
