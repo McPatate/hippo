@@ -127,8 +127,9 @@ impl HippoServer {
         }
     }
 
+    /// In scope, and not on its way out (an agent asked to forget it).
     fn visible(&self, m: &Memory) -> bool {
-        m.visible_in(&self.roots.read().unwrap())
+        m.status() != Some("forget") && m.visible_in(&self.roots.read().unwrap())
     }
 
     /// A memory this agent may see, or "not found" (never reveals out-of-scope names).
@@ -202,7 +203,7 @@ impl HippoServer {
 
     #[tool(
         title = "🦛 Remember",
-        description = "Save or update a memory about the user. Reusing a name replaces that memory (history is kept).",
+        description = "Save or update a memory about the user. Reusing a name replaces that memory (history is kept). Your writes are drafts until the user approves them.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn remember(&self, Parameters(a): Parameters<RememberArgs>) -> Result<CallToolResult, McpError> {
@@ -212,7 +213,7 @@ impl HippoServer {
             return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
         }
         let existing = vault.read_memory(&a.name).ok();
-        if existing.as_ref().is_some_and(|m| !self.visible(m)) {
+        if existing.as_ref().is_some_and(|m| !m.visible_in(&self.roots.read().unwrap())) {
             return Err(McpError::invalid_params(format!("the name `{}` is taken outside this project; pick another", a.name), None));
         }
         let updated = existing.is_some();
@@ -236,14 +237,15 @@ impl HippoServer {
             Some(v) => return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private or project:<folder>"), None)),
         }
         reject_secrets(&m.render())?;
-        let commit = vault.remember(&m).map_err(err)?;
+        let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
+        let commit = vault.remember_by(&m, Some(&agent)).map_err(err)?;
         let name = crate::memory::slugify(&m.name);
         let receipt = match &commit {
             Some(c) => {
                 self.schedule_backup();
                 let what = if m.description.is_empty() { String::new() } else { format!(" — {}", m.description) };
                 format!(
-                    "{} `{name}` [{}]{what} · {} · {}",
+                    "{} `{name}` [{}]{what} · draft until you approve (`hippo review`) · {} · {}",
                     if updated { "updated" } else { "remembered" },
                     m.kind,
                     &c[..8],
@@ -323,15 +325,16 @@ impl HippoServer {
 
     #[tool(
         title = "🦛 Forget",
-        description = "Remove a memory from the vault. It stays in local history and existing backups.",
+        description = "Remove a memory. It is hidden from agents right away and deleted once the user approves; history keeps it.",
         annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
     )]
     async fn forget(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
-        let removed = self.read_visible(&vault, &a.name).is_ok() && vault.forget(&a.name).map_err(err)?;
+        let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
+        let removed = self.read_visible(&vault, &a.name).is_ok() && vault.request_forget(&a.name, &agent).map_err(err)?;
         let receipt = if removed {
             self.schedule_backup();
-            format!("forgot `{}` · still in history · {}", a.name, self.backup_note(&vault))
+            format!("forgot `{}` · removed once you approve (`hippo review`) · {}", a.name, self.backup_note(&vault))
         } else {
             format!("no memory named `{}`", a.name)
         };
