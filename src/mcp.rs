@@ -16,7 +16,7 @@ use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
-    schemars, tool, tool_handler, tool_router,
+    prompt, prompt_handler, prompt_router, schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -50,6 +50,8 @@ pub struct HippoServer {
     roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    #[allow(dead_code)]
+    prompt_router: rmcp::handler::server::router::prompt::PromptRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -127,6 +129,7 @@ impl HippoServer {
             backup_again: Arc::default(),
             roots: Arc::new(std::sync::RwLock::new(std::env::current_dir().into_iter().collect())),
             tool_router: Self::tool_router(),
+            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -396,10 +399,38 @@ impl HippoServer {
     }
 }
 
+#[prompt_router]
+impl HippoServer {
+    /// 🧹 Cleanup time: a guided pass over the memory, decided with the user.
+    #[prompt(name = "cleanup", description = "🧹 Tidy your memory with the agent: merge duplicates, fix stale or cryptic notes. You approve every change.")]
+    async fn cleanup(&self) -> Result<Vec<PromptMessage>, McpError> {
+        let vault = self.vault()?;
+        let visible: Vec<Memory> = vault.list().map_err(err)?.into_iter().filter(|m| self.visible(m)).collect();
+        let dupes: Vec<String> = crate::cleanup::likely_duplicates(&visible).iter().map(|(a, b, _)| format!("- `{a}` ~ `{b}`")).collect();
+        let pending = visible.iter().filter(|m| m.needs_review()).count();
+        let text = format!(
+            "🧹 Cleanup time: help me tidy my hippo memory ({} memories here). hippo has no opinion on how \
+             memories should be organized; we decide together.\n\n\
+             1. `list_memories`, then `recall` the ones you need to compare.\n\
+             2. Look for duplicates, overlapping topics, outdated facts, cryptic notes, and memories scoped too wide \
+             or too narrow (`visibility`). Likely duplicates hippo spotted:\n{}\n\
+             3. Propose a short plan, one line per change (merge / rewrite / rescope / forget) with why. \
+             Ask me before changing anything: I may want a different organization.\n\
+             4. Apply what I agree to with `remember` (merged content under one name) and `forget` (the leftovers).\n\
+             5. Your changes are drafts: finish by telling me to run `hippo review` in a terminal to approve them{}.",
+            visible.len(),
+            if dupes.is_empty() { "- none".into() } else { dupes.join("\n") },
+            if pending > 0 { format!(" ({pending} already waiting)") } else { String::new() },
+        );
+        Ok(vec![PromptMessage::new_text(Role::User, text)])
+    }
+}
+
 #[tool_handler]
+#[prompt_handler]
 impl ServerHandler for HippoServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().enable_prompts().build())
             .with_server_info(Implementation::new("hippo", env!("CARGO_PKG_VERSION")))
             .with_instructions(INSTRUCTIONS)
     }
