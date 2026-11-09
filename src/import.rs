@@ -47,6 +47,40 @@ fn short_project(slug: &str) -> String {
     slugify(&s)
 }
 
+/// Claude's project dir names encode the path with `/` and `.` turned into `-`, which is lossy.
+/// Find the real directory by trying `/`, `-` and `.` between the parts.
+fn resolve_dir(slug: &str) -> Option<PathBuf> {
+    fn walk(base: &Path, comp: &str, rest: &[&str]) -> Option<PathBuf> {
+        let Some((tok, rest)) = rest.split_first() else {
+            let p = base.join(comp);
+            return p.is_dir().then_some(p);
+        };
+        if comp.is_empty() {
+            return walk(base, tok, rest);
+        }
+        let dir = base.join(comp);
+        if dir.is_dir() {
+            if let Some(p) = walk(&dir, tok, rest) {
+                return Some(p);
+            }
+        }
+        walk(base, &format!("{comp}-{tok}"), rest).or_else(|| walk(base, &format!("{comp}.{tok}"), rest))
+    }
+    let parts: Vec<&str> = slug.trim_start_matches('-').split('-').collect();
+    walk(Path::new("/"), "", &parts)
+}
+
+/// Preferences follow you everywhere; everything else stays in the project Claude scoped it to.
+fn default_scope(kind: &str, slug: &str, short: &str) -> Option<String> {
+    match kind {
+        "user" | "feedback" => None,
+        _ => Some(match resolve_dir(slug) {
+            Some(p) => format!("project:{}", p.display()),
+            None => format!("project:{short}"),
+        }),
+    }
+}
+
 fn sources(from: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut out = vec![];
     for proj in std::fs::read_dir(from).with_context(|| format!("cannot read {}", from.display()))? {
@@ -137,6 +171,11 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
             }
         }
         let prior = imported.get(&(slug.clone(), slugify(&stem)));
+        // Keep a visibility already set (by the user or a previous import); else Claude's scope.
+        let scope = prior.and_then(|p| p.extra.get("visibility").cloned()).or_else(|| default_scope(&m.kind, &slug, &project));
+        if let Some(v) = scope {
+            m.extra.insert("visibility".into(), v);
+        }
         let base = slugify(&stem);
         let name = match prior {
             Some(p) => p.name.clone(), // keep the name it was imported under
@@ -166,7 +205,7 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
         }
         plans[i].status = match prior {
             None => Status::New,
-            Some(p) if p.body == m.body && p.description == m.description && p.kind == m.kind => Status::Unchanged,
+            Some(p) if p.body == m.body && p.description == m.description && p.kind == m.kind && p.extra.get("visibility") == m.extra.get("visibility") => Status::Unchanged,
             Some(_) => Status::Updated,
         };
     }
@@ -187,4 +226,24 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
     );
     let commit = vault.save_locked(&msg)?;
     Ok((plans, commit))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_lossy_claude_project_slugs() {
+        let tmp = tempfile::Builder::new().prefix("hippo").tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        for d in ["work/tokenizers/tokenizers", "side/le.site", "side/my-app"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for d in ["work/tokenizers/tokenizers", "side/le.site", "side/my-app"] {
+            let p = root.join(d);
+            let slug = p.to_string_lossy().replace(['/', '.'], "-");
+            assert_eq!(resolve_dir(&slug), Some(p.clone()), "{slug}");
+        }
+        assert_eq!(resolve_dir("-nope-not-here"), None);
+    }
 }
