@@ -58,3 +58,32 @@ fn agent_forget_waits_for_approval() {
     assert_eq!(v.read_memory("a").unwrap().status(), None);
     assert!(v.read_memory("b").is_err());
 }
+
+#[test]
+fn migrates_folder_scopes_to_project_keys() {
+    use hippo::project::{Registry, Scope, migrate};
+    let (t, v) = vault();
+    let repo = t.path().canonicalize().unwrap().join("code/safetensors");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&repo).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap().status.success());
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "root"]);
+    let scoped = |name: &str, vis: &str| {
+        let mut m = mem(name, "x");
+        m.extra.insert("visibility".into(), vis.into());
+        v.remember(&m).unwrap();
+    };
+    scoped("abs", &format!("project:{}", repo.display()));
+    scoped("dead", "project:bucket-memory");
+    assert_eq!(migrate(&v).unwrap(), 1);
+    assert_eq!(v.read_memory("abs").unwrap().extra["visibility"], "project:safetensors");
+    assert!(Registry::load(&v.root).projects["bucket-memory"].roots.is_empty(), "kept, unlinked");
+
+    // The repo moves: still the same project.
+    let moved = repo.with_file_name("st-renamed");
+    std::fs::rename(&repo, &moved).unwrap();
+    let here = Scope::here(&v, &moved);
+    assert_eq!(here.keys, vec!["safetensors"]);
+    assert!(v.read_memory("abs").unwrap().visible_in(&here));
+    assert!(!v.read_memory("dead").unwrap().visible_in(&here));
+}

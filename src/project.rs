@@ -95,6 +95,24 @@ impl Registry {
         best.map(|(k, _)| vec![k.clone()]).unwrap_or_default()
     }
 
+    /// The project this folder belongs to, registering it under its folder name if it's new.
+    /// A key that exists but matches nothing (e.g. from an old `project:<name>`) is adopted.
+    pub fn key_for(&mut self, id: &Ident) -> String {
+        if let Some(k) = self.resolve(id).into_iter().next() {
+            return k;
+        }
+        let base = id.suggested_key();
+        let mut key = base.clone();
+        for i in 2.. {
+            match self.projects.get(&key) {
+                Some(p) if !p.roots.is_empty() || !p.paths.is_empty() => key = format!("{base}-{i}"),
+                _ => break,
+            }
+        }
+        self.learn(&key, id);
+        key
+    }
+
     /// Remember how to recognize `key` from this folder. Returns whether anything changed.
     pub fn learn(&mut self, key: &str, id: &Ident) -> bool {
         let p = self.projects.entry(key.to_string()).or_default();
@@ -125,7 +143,12 @@ impl Scope {
     pub fn here(vault: &crate::vault::Vault, dir: &Path) -> Scope {
         let id = Ident::of(dir);
         let mut reg = Registry::load(&vault.root);
-        let keys = reg.resolve(&id);
+        let mut keys = reg.resolve(&id);
+        // A folder named like a project nobody has linked yet (an old `project:<name>`): adopt it.
+        let name = id.suggested_key();
+        if keys.is_empty() && reg.projects.get(&name).is_some_and(|p| p.roots.is_empty() && p.paths.is_empty()) {
+            keys.push(name);
+        }
         let changed = keys.iter().fold(false, |c, k| reg.learn(k, &id) | c);
         if changed {
             let _ = vault.save_registry(&reg, "projects: learn where they live");
@@ -133,17 +156,47 @@ impl Scope {
         Scope { dir: id.dir, keys }
     }
 
-    /// Does `project:<p>` include this scope? Keys first; legacy path/folder-name values still work.
+    /// Does `project:<p>` include this scope? (`p` an absolute path: a not yet migrated value.)
     pub fn includes(&self, p: &str) -> bool {
-        if self.keys.iter().any(|k| k.eq_ignore_ascii_case(p)) {
-            return true;
-        }
-        if p.starts_with('/') {
-            self.dir.starts_with(p)
+        self.keys.iter().any(|k| k.eq_ignore_ascii_case(p)) || (p.starts_with('/') && self.dir.starts_with(p))
+    }
+}
+
+/// Turn folder-based scopes (`project:/abs/path`, `project:<folder name>`) into project keys.
+/// Returns how many memories changed.
+pub fn migrate(vault: &crate::vault::Vault) -> Result<usize> {
+    use crate::memory::{Visibility, slugify};
+    let _lock = vault.lock()?;
+    let mut reg = Registry::load(&vault.root);
+    let mut changed = 0;
+    for mut m in vault.list()? {
+        let Visibility::Project(p) = m.visibility() else { continue };
+        let key = if p.starts_with('/') && Path::new(&p).exists() {
+            reg.key_for(&Ident::of(Path::new(&p)))
+        } else if p.starts_with('/') {
+            // Gone from this disk (moved, or another device's path): keep it as a path matcher.
+            let key = slugify(Path::new(&p).file_name().map(|n| n.to_string_lossy()).unwrap_or_default().as_ref());
+            let e = reg.projects.entry(key.clone()).or_default();
+            if !e.paths.contains(&p) {
+                e.paths.push(p.clone());
+            }
+            key
         } else {
-            self.dir.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(p))
+            let key = slugify(&p);
+            reg.projects.entry(key.clone()).or_default();
+            key
+        };
+        if key != p {
+            m.extra.insert("visibility".into(), format!("project:{key}"));
+            vault.write_memory(&m)?;
+            changed += 1;
         }
     }
+    if changed > 0 || reg != Registry::load(&vault.root) {
+        reg.save(&vault.root)?;
+        vault.save_locked("projects: scope memories by project key")?;
+    }
+    Ok(changed)
 }
 
 #[cfg(test)]
@@ -176,7 +229,7 @@ mod tests {
     #[test]
     fn scope_keeps_legacy_values_working() {
         let s = Scope { dir: "/Users/x/work/safetensors/py".into(), keys: vec!["st".into()] };
-        assert!(s.includes("st") && s.includes("/Users/x/work/safetensors") && s.includes("py"));
-        assert!(!s.includes("safetensors") && !s.includes("other"));
+        assert!(s.includes("st") && s.includes("/Users/x/work/safetensors"));
+        assert!(!s.includes("safetensors") && !s.includes("py") && !s.includes("/Users/x/work/other"));
     }
 }
