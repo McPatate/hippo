@@ -69,6 +69,9 @@ enum Cmd {
     Log {
         #[arg(short, long, default_value_t = 20)]
         n: usize,
+        /// Only actions by this agent (e.g. `claude-code`): what it read and wrote
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// List memories
     Ls {
@@ -677,9 +680,16 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Log { n } => {
+        Cmd::Log { n, agent } => {
             let v = open_vault(cli)?;
-            let entries = hippo::log::tail(&v.root, *n);
+            let entries: Vec<Value> = match agent {
+                None => hippo::log::tail(&v.root, *n),
+                Some(a) => {
+                    let all = hippo::log::tail(&v.root, usize::MAX);
+                    let mine: Vec<Value> = all.into_iter().filter(|e| e["via"].as_str().is_some_and(|v| v.contains(a.as_str()))).collect();
+                    mine[mine.len().saturating_sub(*n)..].to_vec()
+                }
+            };
             out.done(json!({"entries": entries}), || {
                 entries
                     .iter()
