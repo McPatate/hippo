@@ -29,6 +29,9 @@ It is a folder of Markdown files the user owns, encrypted and backed up by hippo
 They return names and descriptions; `recall` only what you actually need.\n\
 - Use `remember` to save durable facts about the user, their preferences, projects and feedback \
 (one fact or topic per memory, short kebab-case names, update an existing memory instead of duplicating).\n\
+- Memories are general guidance from past sessions: they can be outdated, and `unconfirmed` ones \
+were written by an agent and not yet reviewed by the user. What the user says now wins.\n\
+- Your writes are drafts until the user approves them with `hippo review`.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
 - Facts that only matter in the current project: `remember` with `visibility: \"project:<folder name>\"`.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
@@ -262,7 +265,9 @@ impl HippoServer {
         let vault = self.vault()?;
         let m = self.read_visible(&vault, &a.name)?;
         crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name, "shared": "full text"}));
-        self.reply(&vault, format!("recalled `{}`", m.name), m.render())
+        let from = m.provenance(m.updated().is_none().then(|| vault.last_changed(&m.name)).flatten());
+        let from = if from.is_empty() { String::new() } else { format!(" · {from}") };
+        self.reply(&vault, format!("recalled `{}`{from}", m.name), m.render())
     }
 
     #[tool(
@@ -276,7 +281,7 @@ impl HippoServer {
         let lines: Vec<String> = list
             .iter()
             .filter(|m| a.kind.as_ref().is_none_or(|k| &m.kind == k) && self.visible(m))
-            .map(|m| format!("- {} [{}] {}", m.name, m.kind, m.description))
+            .map(|m| format!("- {} [{}]{} {}", m.name, m.kind, if m.needs_review() { " (unconfirmed)" } else { "" }, m.description))
             .collect();
         let filter = a.kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
         crate::log::record(&vault.root, "list", serde_json::json!({"count": lines.len(), "shared": "descriptions"}));
@@ -314,9 +319,12 @@ impl HippoServer {
         };
         let body = hits
             .iter()
-            .map(|h| match snippets {
-                true => format!("- {} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")),
-                false => format!("- {} — {}", h.name, h.description),
+            .map(|h| {
+                let draft = if vault.read_memory(&h.name).is_ok_and(|m| m.needs_review()) { " (unconfirmed)" } else { "" };
+                match snippets {
+                    true => format!("- {}{draft} — {}\n  {}", h.name, h.description, h.snippet.replace('\n', " ")),
+                    false => format!("- {}{draft} — {}", h.name, h.description),
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
