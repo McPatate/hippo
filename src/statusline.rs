@@ -112,7 +112,8 @@ pub fn snapshot(vault: &Path) -> Option<Snapshot> {
         .unwrap_or_default();
     let review = files
         .iter()
-        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| crate::memory::Memory::parse("", &t).needs_review()))
+        // Cheap: a `status:` line in the frontmatter, no full parse (this runs on every prompt).
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.split("\n---").next().is_some_and(|f| f.contains("\nstatus:"))))
         .count();
     Some(Snapshot {
         name: buddy.name,
