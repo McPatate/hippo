@@ -87,3 +87,12 @@ fn migrates_folder_scopes_to_project_keys() {
     assert!(v.read_memory("abs").unwrap().visible_in(&here));
     assert!(!v.read_memory("dead").unwrap().visible_in(&here));
 }
+
+#[test]
+fn rewriting_the_same_memory_is_a_no_op() {
+    let (_t, v) = vault();
+    let m = Memory { name: "Prefers Rust".into(), kind: "note".into(), body: "Uses Rust.".into(), ..Default::default() };
+    v.remember(&m).unwrap();
+    assert_eq!(v.remember_by(&m, AGENT).unwrap(), None, "approved memory stays approved");
+    assert_eq!(v.read_memory("prefers-rust").unwrap().status(), None);
+}

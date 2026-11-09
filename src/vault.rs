@@ -229,7 +229,9 @@ impl Vault {
     /// Write + commit, stamped with who wrote it. An agent's write is a draft until approved.
     pub fn remember_by(&self, m: &Memory, agent: Option<&str>) -> Result<Option<String>> {
         let _lock = self.lock()?;
-        let mut m = m.clone();
+        // Compare in the form it is stored in (slug name, normalized body).
+        let mut m = Memory::parse("", &m.render());
+        m.name = slugify(&m.name);
         m.stamp(self.read_memory(&m.name).ok().as_ref(), agent);
         let rel = self.rel(&self.write_memory(&m)?);
         self.commit_one_locked(&rel, &format!("remember: {rel}"))
