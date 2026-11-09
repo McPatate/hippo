@@ -141,6 +141,9 @@ pub struct Scope {
 impl Scope {
     /// Resolve `dir` against the vault's registry, learning new paths/roots for known projects.
     pub fn here(vault: &crate::vault::Vault, dir: &Path) -> Scope {
+        if let Err(e) = migrate(vault) {
+            eprintln!("hippo: could not migrate project scopes: {e:#}");
+        }
         let id = Ident::of(dir);
         let mut reg = Registry::load(&vault.root);
         let mut keys = reg.resolve(&id);
