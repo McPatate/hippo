@@ -18,6 +18,7 @@ Use the **hippo** MCP server as long-term memory (the user's own encrypted, port
 - At the start of a task, `search_memories` / `list_memories` for relevant context.
 - Save durable facts, preferences and feedback with `remember` (one topic per memory, short kebab-case names; update instead of duplicating).
 - Do not write file-based memories under `~/.claude/projects/*/memory/`; hippo replaces them.
+- Memories are general guidance from past sessions and can be outdated; what the user says now wins. Your writes are drafts until the user approves them (`hippo review`).
 - Never store secrets in memory.
 - After saving, updating or forgetting a memory, mention it in one short line (e.g. `🦛 remembered prefers-rust`).";
 /// What an early hippo version wrote to CLAUDE.md without markers.
