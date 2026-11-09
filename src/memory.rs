@@ -97,7 +97,7 @@ fn one_line(s: &str) -> String {
 
 /// Who may see a memory: frontmatter `visibility: all | private | project:<name>` (default `all`).
 /// `private` memories never leave hippo over MCP; `project:<name>` ones only reach agents whose
-/// working folder is named `<name>` (or is that absolute path).
+/// working folder is named `<name>`, or is inside `<name>` when it is an absolute path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Visibility {
     All,
@@ -120,7 +120,11 @@ impl Memory {
             Visibility::All => true,
             Visibility::Private => false,
             Visibility::Project(p) => roots.iter().any(|r| {
-                r.as_os_str() == p.as_str() || r.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&p))
+                if p.starts_with('/') {
+                    r.starts_with(&p)
+                } else {
+                    r.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&p))
+                }
             }),
         }
     }
@@ -180,6 +184,8 @@ mod tests {
         assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/hippo")]));
         m.extra.insert("visibility".into(), "project:/Users/x/work/safetensors".into());
         assert!(m.visible_in(&here));
+        assert!(m.visible_in(&[PathBuf::from("/Users/x/work/safetensors/bindings/python")]));
+        assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/safetensors-old")]));
         m.extra.insert("visibility".into(), "private".into());
         assert!(!m.visible_in(&here));
     }
