@@ -221,10 +221,17 @@ impl Vault {
         p.strip_prefix(&self.root).unwrap_or(p).to_string_lossy().replace('\\', "/")
     }
 
-    /// Write + commit in one go (what `hippo add` and agents use).
+    /// Write + commit in one go, as the user.
     pub fn remember(&self, m: &Memory) -> Result<Option<String>> {
+        self.remember_by(m, None)
+    }
+
+    /// Write + commit, stamped with who wrote it. An agent's write is a draft until approved.
+    pub fn remember_by(&self, m: &Memory, agent: Option<&str>) -> Result<Option<String>> {
         let _lock = self.lock()?;
-        let rel = self.rel(&self.write_memory(m)?);
+        let mut m = m.clone();
+        m.stamp(self.read_memory(&m.name).ok().as_ref(), agent);
+        let rel = self.rel(&self.write_memory(&m)?);
         self.commit_one_locked(&rel, &format!("remember: {rel}"))
     }
 
