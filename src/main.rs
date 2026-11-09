@@ -895,6 +895,16 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 );
                 return Ok(());
             }
+            // Memories scoped to a project no folder matches: no agent can see them.
+            let reg = hippo::project::Registry::load(&v.root);
+            let unlinked: Vec<String> = reg.projects.iter().filter(|(_, p)| p.roots.is_empty() && p.paths.is_empty()).map(|(k, _)| k.clone()).collect();
+            let stranded = v.list()?.iter().filter(|m| matches!(m.visibility(), hippo::memory::Visibility::Project(k) if unlinked.contains(&k))).count();
+            if stranded > 0 {
+                out.say(yellow(&format!(
+                    "⚠ {stranded} memories belong to projects no folder is linked to ({}), so no agent sees them\n  → `hippo project link <key> <dir>`, or rescope them\n",
+                    unlinked.join(", ")
+                )));
+            }
             if pending.is_empty() {
                 out.say(format!("{} nothing to review", green("✓")));
                 return Ok(());
