@@ -80,6 +80,8 @@ enum Cmd {
     },
     /// Print a memory
     Show { name: String },
+    /// Approve or reject what agents changed (agent writes are drafts until you do)
+    Review,
     /// Full-text search
     Search {
         query: Vec<String>,
@@ -348,6 +350,33 @@ fn read_body(agent: bool, message: Option<String>, existing: Option<&str>) -> Re
         bail!("editor exited with an error; nothing saved");
     }
     Ok(body)
+}
+
+/// The pending change as a diff against the last approved version.
+fn print_change(v: &Vault, m: &Memory) -> Result<()> {
+    if m.status() == Some("forget") {
+        eprintln!("{}", red("  asks to remove this memory"));
+        return Ok(());
+    }
+    let (base, now) = (v.meta_dir().join("review-base.md"), v.meta_dir().join("review-now.md"));
+    let approved = v.approved_version(&m.name)?.map(|t| Memory::parse(&m.name, &t).content().render());
+    std::fs::write(&base, approved.unwrap_or_default())?;
+    std::fs::write(&now, m.content().render())?;
+    let color = if ui::color() { "--color=always" } else { "--color=never" };
+    let d = v.git.try_run(["diff", "--no-index", color, &base.to_string_lossy(), &now.to_string_lossy()])?;
+    let _ = (std::fs::remove_file(&base), std::fs::remove_file(&now));
+    // Skip the `diff --git` / `index` / `---` / `+++` header.
+    eprintln!("{}", d.stdout.lines().skip_while(|l| !l.contains("@@")).collect::<Vec<_>>().join("\n"));
+    Ok(())
+}
+
+fn edit_file(path: &std::path::Path) -> Result<()> {
+    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    let ok = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(path).status()?.success();
+    if !ok {
+        bail!("editor exited with an error");
+    }
+    Ok(())
 }
 
 fn status_json(v: &Vault, s: &backup::Status) -> Value {
@@ -795,6 +824,44 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body}),
                 || m.render(),
             );
+            Ok(())
+        }
+        Cmd::Review => {
+            let v = open_vault(cli)?;
+            let pending: Vec<Memory> = v.pending_review()?.into_iter().filter(|m| out.sees(m)).collect();
+            // Agents can see what is waiting; only the user decides.
+            if !out.sees_all() || !std::io::stdin().is_terminal() {
+                out.done(
+                    json!({"pending": pending.iter().map(|m| json!({"name": m.name, "status": m.status(), "by": m.extra.get("by"), "updated": m.extra.get("updated")})).collect::<Vec<_>>(),
+                           "note": "only the user can approve: they run `hippo review` in a terminal"}),
+                    || pending.iter().map(|m| format!("{:<32} {}\n", bold(&m.name), dim(&m.provenance(None)))).collect(),
+                );
+                return Ok(());
+            }
+            if pending.is_empty() {
+                out.say(format!("{} nothing to review", green("✓")));
+                return Ok(());
+            }
+            out.say(format!("🦛 {} change(s) to review\n", pending.len()));
+            for m in &pending {
+                eprintln!("{} {}", bold(&m.name), dim(&format!("· {}", m.provenance(None))));
+                print_change(&v, m)?;
+                loop {
+                    let done = match prompt("[a]pprove [r]eject [e]dit [s]kip [q]uit", "s")?.as_str() {
+                        "a" => v.approve(&m.name).map(|_| green("✓ approved"))?,
+                        "r" => v.reject(&m.name).map(|_| yellow("↩ rejected"))?,
+                        "e" if m.status() != Some("forget") => {
+                            edit_file(&v.memory_path(&m.name))?;
+                            v.approve(&m.name).map(|_| green("✓ edited and approved"))?
+                        }
+                        "s" => dim("skipped"),
+                        "q" => return Ok(()),
+                        _ => continue,
+                    };
+                    eprintln!("  {done}\n");
+                    break;
+                }
+            }
             Ok(())
         }
         Cmd::Search { query, limit } => {

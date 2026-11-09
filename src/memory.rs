@@ -148,14 +148,15 @@ impl Memory {
         self.extra.get("updated").and_then(|t| t.parse().ok())
     }
 
-    /// Same memory, ignoring provenance?
+    /// The memory without provenance fields (what a review diff compares).
+    pub fn content(&self) -> Memory {
+        let mut m = self.clone();
+        m.extra.retain(|k, _| !PROVENANCE.contains(&k.as_str()));
+        m
+    }
+
     pub fn same_content(&self, other: &Memory) -> bool {
-        let strip = |m: &Memory| {
-            let mut m = m.clone();
-            m.extra.retain(|k, _| !PROVENANCE.contains(&k.as_str()));
-            m
-        };
-        strip(self) == strip(other)
+        self.content() == other.content()
     }
 
     /// Record who wrote this version. Agent writes are drafts until the user approves them;
