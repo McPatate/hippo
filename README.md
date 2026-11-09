@@ -33,6 +33,7 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 | `hippo` / `hippo status` | local · uploaded · verified, at a glance |
 | `hippo add <name> [-m …] [-t user\|feedback\|project\|reference\|note]` | save a memory (stdin / `$EDITOR` work too) |
 | `hippo ls`, `show`, `search`, `rm` | browse |
+| `hippo project [link <key> [dir]]` | projects that scoped memories belong to; recognized by git repo, so moves and clones just work |
 | `hippo review` | approve or reject what agents changed (their writes are drafts until you do) |
 | `hippo save` | commit edits made directly to the files |
 | `hippo backup` · `hippo sync` | back up · pull other devices, merge, back up |

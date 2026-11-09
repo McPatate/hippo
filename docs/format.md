@@ -7,6 +7,7 @@ Everything needed to read a hippo vault or backup **without hippo**.
 ```
 <vault>/
   memories/<slug>.md     one memory per file
+  projects.toml          project keys → how to recognize them (git root commits, folder paths)
   media/                 any files
   .git/                  plain git repo, branch `main`
   .hippo/                local-only (gitignored): vault.toml, state.json, index.sqlite, outbox/, merges/
@@ -20,12 +21,20 @@ name: prefers-rust          # slug, = file stem
 description: one line
 type: user | feedback | project | reference | note
 tags: a, b
-visibility: all | private | project:<path or folder name>   # who may read it (default all)
+visibility: all | private | project:<key>   # who may read it (default all)
 by: user | <agent>          # who wrote this version
 updated: 2026-11-09T12:00:00Z
 status: draft | forget      # an agent change the user hasn't reviewed (absent = confirmed)
 ---
 Body (Markdown).
+```
+
+A project is a key in `projects.toml`, not a folder: an agent is in project `<key>` when its folder's git repo has one of the key's root commits (true for every clone, wherever it lives and whatever it is called), else when its folder is inside one of the key's paths. hippo learns new paths and root commits as they match, so moves and renames need nothing.
+
+```toml
+[projects.safetensors]
+roots = ["9f1c…"]
+paths = ["/Users/me/work/safetensors"]
 ```
 
 Agent writes are drafts until the user approves them (`hippo review`). Rejecting restores the last version without `status`; an agent's `forget` hides the memory from agents until the user approves the removal.
