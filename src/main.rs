@@ -812,8 +812,8 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let v = open_vault(cli)?;
             let list: Vec<Memory> = v.list()?.into_iter().filter(|m| kind.as_ref().is_none_or(|k| &m.kind == k) && out.sees(m)).collect();
             out.done(
-                json!({"memories": list.iter().map(|m| json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags})).collect::<Vec<_>>()}),
-                || list.iter().map(|m| format!("{:<32} {:<10} {}\n", bold(&m.name), dim(&m.kind), m.description)).collect(),
+                json!({"memories": list.iter().map(|m| json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "unconfirmed": m.needs_review()})).collect::<Vec<_>>()}),
+                || list.iter().map(|m| format!("{:<32} {:<10} {}{}\n", bold(&m.name), dim(&m.kind), if m.needs_review() { yellow("✎ ") } else { String::new() }, m.description)).collect(),
             );
             Ok(())
         }
@@ -821,7 +821,8 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let v = open_vault(cli)?;
             let m = v.read_memory(name).ok().filter(|m| out.sees(m)).with_context(|| format!("no memory named `{name}`"))?;
             out.done(
-                json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body}),
+                json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body,
+                       "provenance": m.provenance(m.updated().is_none().then(|| v.last_changed(&m.name)).flatten())}),
                 || m.render(),
             );
             Ok(())
