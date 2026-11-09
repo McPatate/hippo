@@ -29,6 +29,7 @@ It is a folder of Markdown files the user owns, encrypted and backed up by hippo
 - Use `remember` to save durable facts about the user, their preferences, projects and feedback \
 (one fact or topic per memory, short kebab-case names, update an existing memory instead of duplicating).\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
+- Facts that only matter in the current project: `remember` with `visibility: \"project:<folder name>\"`.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
 - If a response starts with `⚠️ MEMORY MERGE CONFLICT`, resolve it with `resolve_conflict` before \
 continuing: keep information from both sides when they are compatible; if they genuinely disagree, \
@@ -40,6 +41,9 @@ pub struct HippoServer {
     key_path: PathBuf,
     backup_running: Arc<AtomicBool>,
     backup_again: Arc<AtomicBool>,
+    /// The agent's project folder (stdio servers start in it): scope for `project:` memories.
+    /// (MCP roots would be the protocol answer, but they are deprecated by SEP-2577.)
+    roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -56,6 +60,8 @@ pub struct RememberArgs {
     #[serde(rename = "type")]
     pub kind: Option<String>,
     pub tags: Option<Vec<String>>,
+    /// `all` (default), `private` (never returned to agents), or `project:<folder name>`.
+    pub visibility: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -115,8 +121,22 @@ impl HippoServer {
             key_path,
             backup_running: Arc::default(),
             backup_again: Arc::default(),
+            roots: Arc::new(std::sync::RwLock::new(std::env::current_dir().into_iter().collect())),
             tool_router: Self::tool_router(),
         }
+    }
+
+    fn visible(&self, m: &Memory) -> bool {
+        m.visible_in(&self.roots.read().unwrap())
+    }
+
+    /// A memory this agent may see, or "not found" (never reveals out-of-scope names).
+    fn read_visible(&self, vault: &Vault, name: &str) -> Result<Memory, McpError> {
+        vault
+            .read_memory(name)
+            .ok()
+            .filter(|m| self.visible(m))
+            .ok_or_else(|| McpError::invalid_params(format!("no memory named `{name}`"), None))
     }
 
     fn vault(&self) -> Result<Vault, McpError> {
@@ -191,6 +211,9 @@ impl HippoServer {
             return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
         }
         let existing = vault.read_memory(&a.name).ok();
+        if existing.as_ref().is_some_and(|m| !self.visible(m)) {
+            return Err(McpError::invalid_params(format!("the name `{}` is taken outside this project; pick another", a.name), None));
+        }
         let updated = existing.is_some();
         let m = Memory {
             name: a.name.clone(),
@@ -200,6 +223,17 @@ impl HippoServer {
             extra: existing.map(|e| e.extra).unwrap_or_default(),
             body: a.content,
         };
+        let mut m = m;
+        match a.visibility.as_deref().map(str::trim) {
+            None => {}
+            Some("all") => {
+                m.extra.remove("visibility");
+            }
+            Some(v) if v == "private" || (v.starts_with("project:") && v.len() > 8) => {
+                m.extra.insert("visibility".into(), v.to_string());
+            }
+            Some(v) => return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private or project:<folder>"), None)),
+        }
         reject_secrets(&m.render())?;
         let commit = vault.remember(&m).map_err(err)?;
         let name = crate::memory::slugify(&m.name);
@@ -223,7 +257,7 @@ impl HippoServer {
     #[tool(title = "🦛 Recall", description = "Read one memory by name.", annotations(read_only_hint = true, open_world_hint = false))]
     async fn recall(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
-        let m = vault.read_memory(&a.name).map_err(err)?;
+        let m = self.read_visible(&vault, &a.name)?;
         crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name}));
         self.reply(&vault, format!("recalled `{}`", m.name), m.render())
     }
@@ -238,7 +272,7 @@ impl HippoServer {
         let list = vault.list().map_err(err)?;
         let lines: Vec<String> = list
             .iter()
-            .filter(|m| a.kind.as_ref().is_none_or(|k| &m.kind == k))
+            .filter(|m| a.kind.as_ref().is_none_or(|k| &m.kind == k) && self.visible(m))
             .map(|m| format!("- {} [{}] {}", m.name, m.kind, m.description))
             .collect();
         let filter = a.kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
@@ -254,7 +288,14 @@ impl HippoServer {
         let vault = self.vault()?;
         let mut idx = Index::open(&vault.root).map_err(err)?;
         idx.refresh(&vault.memories_dir()).map_err(err)?;
-        let hits = idx.search(&a.query, a.limit.unwrap_or(10)).map_err(err)?;
+        let limit = a.limit.unwrap_or(10);
+        let hits: Vec<_> = idx
+            .search(&a.query, limit * 4)
+            .map_err(err)?
+            .into_iter()
+            .filter(|h| vault.read_memory(&h.name).is_ok_and(|m| self.visible(&m)))
+            .take(limit)
+            .collect();
         let names: Vec<&str> = hits.iter().take(3).map(|h| h.name.as_str()).collect();
         crate::log::record(&vault.root, "search", serde_json::json!({"query": &a.query, "hits": hits.len()}));
         let receipt = match hits.len() {
@@ -276,7 +317,7 @@ impl HippoServer {
     )]
     async fn forget(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
-        let removed = vault.forget(&a.name).map_err(err)?;
+        let removed = self.read_visible(&vault, &a.name).is_ok() && vault.forget(&a.name).map_err(err)?;
         let receipt = if removed {
             self.schedule_backup();
             format!("forgot `{}` · still in history · {}", a.name, self.backup_note(&vault))
@@ -345,6 +386,7 @@ impl ServerHandler for HippoServer {
         if let Some(info) = context.peer.peer_info() {
             crate::safety::set_agent_name(&info.client_info.name);
         }
+
     }
 }
 
