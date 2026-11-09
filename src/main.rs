@@ -918,7 +918,13 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 eprintln!("{} {}", bold(&m.name), dim(&format!("· {}", m.provenance(None))));
                 print_change(&v, m)?;
                 loop {
-                    let done = match prompt("[a]pprove [r]eject [e]dit [s]kip [q]uit", "s")?.as_str() {
+                    let answer = prompt("[a]pprove [r]eject [e]dit [s]kip [q]uit", "s")?;
+                    // Only act on the version that was shown.
+                    if matches!(answer.as_str(), "a" | "r" | "e") && v.read_memory(&m.name).ok().as_ref() != Some(m) {
+                        eprintln!("  {}\n", yellow("changed while you were reviewing; skipped (run `hippo review` again)"));
+                        break;
+                    }
+                    let done = match answer.as_str() {
                         "a" => v.approve(&m.name).map(|_| green("✓ approved"))?,
                         "r" => v.reject(&m.name).map(|_| yellow("↩ rejected"))?,
                         "e" if m.status() != Some("forget") => {
