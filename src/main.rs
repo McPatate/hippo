@@ -71,7 +71,7 @@ enum Cmd {
         n: usize,
         /// Only actions by this agent (e.g. `claude-code`): what it read and wrote
         #[arg(long)]
-        agent: Option<String>,
+        by: Option<String>,
     },
     /// List memories
     Ls {
@@ -680,9 +680,9 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Log { n, agent } => {
+        Cmd::Log { n, by } => {
             let v = open_vault(cli)?;
-            let entries: Vec<Value> = match agent {
+            let entries: Vec<Value> = match by {
                 None => hippo::log::tail(&v.root, *n),
                 Some(a) => {
                     let all = hippo::log::tail(&v.root, usize::MAX);
