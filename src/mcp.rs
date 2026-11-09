@@ -10,6 +10,7 @@ use crate::backup;
 use crate::crypto::Key;
 use crate::index::Index;
 use crate::memory::{KINDS, Memory};
+use crate::project::Scope;
 use crate::remote::Remote;
 use crate::vault::{Vault, has_conflict_markers};
 use rmcp::{
@@ -33,7 +34,7 @@ They return names and descriptions; `recall` only what you actually need.\n\
 were written by an agent and not yet reviewed by the user. What the user says now wins.\n\
 - Your writes are drafts until the user approves them with `hippo review`.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
-- Facts that only matter in the current project: `remember` with `visibility: \"project:<folder name>\"`.\n\
+- Facts that only matter in the current project: `remember` with `visibility: \"project\"`.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
 - If a response starts with `⚠️ MEMORY MERGE CONFLICT`, resolve it with `resolve_conflict` before \
 continuing: keep information from both sides when they are compatible; if they genuinely disagree, \
@@ -45,9 +46,9 @@ pub struct HippoServer {
     key_path: PathBuf,
     backup_running: Arc<AtomicBool>,
     backup_again: Arc<AtomicBool>,
-    /// The agent's project folder (stdio servers start in it): scope for `project:` memories.
+    /// The agent's project (stdio servers start in its folder): scope for `project:` memories.
     /// (MCP roots would be the protocol answer, but they are deprecated by SEP-2577.)
-    roots: Arc<std::sync::RwLock<Vec<PathBuf>>>,
+    scope: Arc<std::sync::RwLock<Scope>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
@@ -66,7 +67,7 @@ pub struct RememberArgs {
     #[serde(rename = "type")]
     pub kind: Option<String>,
     pub tags: Option<Vec<String>>,
-    /// `all` (default), `private` (never returned to agents), or `project:<folder name>`.
+    /// `all` (default), `private` (never returned to agents), `project` (only in this project), or `project:<key>`.
     pub visibility: Option<String>,
 }
 
@@ -122,12 +123,17 @@ fn err(e: anyhow::Error) -> McpError {
 #[tool_router]
 impl HippoServer {
     pub fn new(vault_path: PathBuf, key_path: PathBuf) -> Self {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let scope = match Vault::open(&vault_path) {
+            Ok(v) => Scope::here(&v, &cwd),
+            Err(_) => Scope { dir: cwd, keys: vec![] },
+        };
         Self {
             vault_path,
             key_path,
             backup_running: Arc::default(),
             backup_again: Arc::default(),
-            roots: Arc::new(std::sync::RwLock::new(std::env::current_dir().into_iter().collect())),
+            scope: Arc::new(std::sync::RwLock::new(scope)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
@@ -135,7 +141,7 @@ impl HippoServer {
 
     /// In scope, and not on its way out (an agent asked to forget it).
     fn visible(&self, m: &Memory) -> bool {
-        m.status() != Some("forget") && m.visible_in(&self.roots.read().unwrap())
+        m.status() != Some("forget") && m.visible_in(&self.scope.read().unwrap())
     }
 
     /// A memory this agent may see, or "not found" (never reveals out-of-scope names).
@@ -145,6 +151,34 @@ impl HippoServer {
             .ok()
             .filter(|m| self.visible(m))
             .ok_or_else(|| McpError::invalid_params(format!("no memory named `{name}`"), None))
+    }
+
+    /// The key for a project-scoped write. `None` means this project: its key, created from the
+    /// folder name the first time. A key nobody uses yet is linked to this folder.
+    fn project_key(&self, vault: &Vault, key: Option<&str>) -> anyhow::Result<String> {
+        let mut scope = self.scope.write().unwrap();
+        let mut reg = crate::project::Registry::load(&vault.root);
+        let key = match key {
+            Some(k) => crate::memory::slugify(k),
+            None if !scope.keys.is_empty() => return Ok(scope.keys[0].clone()),
+            None => {
+                let base = crate::project::Ident::of(&scope.dir).suggested_key();
+                let mut k = base.clone();
+                for i in 2.. {
+                    if !reg.projects.contains_key(&k) {
+                        break;
+                    }
+                    k = format!("{base}-{i}");
+                }
+                k
+            }
+        };
+        if !reg.projects.contains_key(&key) {
+            reg.learn(&key, &crate::project::Ident::of(&scope.dir));
+            vault.save_registry(&reg, &format!("projects: add {key}"))?;
+            scope.keys.push(key.clone());
+        }
+        Ok(key)
     }
 
     fn vault(&self) -> Result<Vault, McpError> {
@@ -219,7 +253,7 @@ impl HippoServer {
             return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
         }
         let existing = vault.read_memory(&a.name).ok();
-        if existing.as_ref().is_some_and(|m| !m.visible_in(&self.roots.read().unwrap())) {
+        if existing.as_ref().is_some_and(|m| !m.visible_in(&self.scope.read().unwrap())) {
             return Err(McpError::invalid_params(format!("the name `{}` is taken outside this project; pick another", a.name), None));
         }
         let updated = existing.is_some();
@@ -237,10 +271,14 @@ impl HippoServer {
             Some("all") => {
                 m.extra.remove("visibility");
             }
-            Some(v) if v == "private" || (v.starts_with("project:") && v.len() > 8) => {
-                m.extra.insert("visibility".into(), v.to_string());
+            Some("private") => {
+                m.extra.insert("visibility".into(), "private".into());
             }
-            Some(v) => return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private or project:<folder>"), None)),
+            Some(v) if v == "project" || (v.starts_with("project:") && v.len() > 8) => {
+                let key = self.project_key(&vault, v.strip_prefix("project:").map(str::trim)).map_err(err)?;
+                m.extra.insert("visibility".into(), format!("project:{key}"));
+            }
+            Some(v) => return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project (this one) or project:<key>"), None)),
         }
         reject_secrets(&m.render())?;
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());

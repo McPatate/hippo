@@ -206,6 +206,8 @@ enum RemoteCmd {
 /// Output sink: human (stderr/stdout, colors) or agent (one JSON object on stdout).
 struct Out {
     agent: bool,
+    /// The agent's project, resolved on first use.
+    scope: std::cell::OnceCell<hippo::project::Scope>,
 }
 
 impl Out {
@@ -216,8 +218,10 @@ impl Out {
 
     /// Agents only see memories scoped to their working folder (same rule as MCP); humans see all.
     /// Keyed on the agent environment, not the output mode, so `--human` is no way around it.
-    fn sees(&self, m: &Memory) -> bool {
-        self.sees_all() || (m.status() != Some("forget") && m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>()))
+    fn sees(&self, v: &Vault, m: &Memory) -> bool {
+        self.sees_all()
+            || (m.status() != Some("forget")
+                && m.visible_in(self.scope.get_or_init(|| hippo::project::Scope::here(v, &std::env::current_dir().unwrap_or_default()))))
     }
 
     /// Who is writing: `None` for the user, else the agent (its changes wait for review).
@@ -810,7 +814,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Ls { kind } => {
             let v = open_vault(cli)?;
-            let list: Vec<Memory> = v.list()?.into_iter().filter(|m| kind.as_ref().is_none_or(|k| &m.kind == k) && out.sees(m)).collect();
+            let list: Vec<Memory> = v.list()?.into_iter().filter(|m| kind.as_ref().is_none_or(|k| &m.kind == k) && out.sees(&v, m)).collect();
             out.done(
                 json!({"memories": list.iter().map(|m| json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "unconfirmed": m.needs_review()})).collect::<Vec<_>>()}),
                 || list.iter().map(|m| format!("{:<32} {:<10} {}{}\n", bold(&m.name), dim(&m.kind), if m.needs_review() { yellow("✎ ") } else { String::new() }, m.description)).collect(),
@@ -819,7 +823,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Show { name } => {
             let v = open_vault(cli)?;
-            let m = v.read_memory(name).ok().filter(|m| out.sees(m)).with_context(|| format!("no memory named `{name}`"))?;
+            let m = v.read_memory(name).ok().filter(|m| out.sees(&v, m)).with_context(|| format!("no memory named `{name}`"))?;
             out.done(
                 json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body,
                        "provenance": m.provenance(m.updated().is_none().then(|| v.last_changed(&m.name)).flatten())}),
@@ -829,7 +833,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Review => {
             let v = open_vault(cli)?;
-            let pending: Vec<Memory> = v.pending_review()?.into_iter().filter(|m| out.sees(m)).collect();
+            let pending: Vec<Memory> = v.pending_review()?.into_iter().filter(|m| out.sees(&v, m)).collect();
             // Agents can see what is waiting; only the user decides.
             if !out.sees_all() || !std::io::stdin().is_terminal() {
                 out.done(
@@ -872,7 +876,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let hits: Vec<_> = idx
                 .search(&query.join(" "), *limit * 4)?
                 .into_iter()
-                .filter(|h| v.read_memory(&h.name).is_ok_and(|m| out.sees(&m)))
+                .filter(|h| v.read_memory(&h.name).is_ok_and(|m| out.sees(&v, &m)))
                 .take(*limit)
                 .collect();
             out.done(
@@ -894,7 +898,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Rm { name } => {
             let v = open_vault(cli)?;
-            if !v.read_memory(name).is_ok_and(|m| out.sees(&m)) {
+            if !v.read_memory(name).is_ok_and(|m| out.sees(&v, &m)) {
                 bail!("no memory named `{name}`");
             }
             if let Some(a) = out.writer() {
@@ -1089,7 +1093,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
 async fn main() {
     let cli = Cli::parse();
     let agent = cli.agent || (!cli.human && hippo::safety::detected_agent().is_some());
-    let out = Out { agent };
+    let out = Out { agent, scope: Default::default() };
     if let Err(e) = run(&cli, &out).await {
         let msg = format!("{e:#}");
         if agent {

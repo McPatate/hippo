@@ -95,9 +95,9 @@ fn one_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
-/// Who may see a memory: frontmatter `visibility: all | private | project:<name>` (default `all`).
-/// `private` memories never leave hippo over MCP; `project:<name>` ones only reach agents whose
-/// working folder is named `<name>`, or is inside `<name>` when it is an absolute path.
+/// Who may see a memory: frontmatter `visibility: all | private | project:<key>` (default `all`).
+/// `private` memories never leave hippo over MCP; `project:<key>` ones only reach agents working
+/// in that project (see `project.rs`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Visibility {
     All,
@@ -114,18 +114,12 @@ impl Memory {
         }
     }
 
-    /// Visible to an agent working in `roots`?
-    pub fn visible_in(&self, roots: &[std::path::PathBuf]) -> bool {
+    /// Visible to an agent working in `scope`?
+    pub fn visible_in(&self, scope: &crate::project::Scope) -> bool {
         match self.visibility() {
             Visibility::All => true,
             Visibility::Private => false,
-            Visibility::Project(p) => roots.iter().any(|r| {
-                if p.starts_with('/') {
-                    r.starts_with(&p)
-                } else {
-                    r.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&p))
-                }
-            }),
+            Visibility::Project(p) => scope.includes(&p),
         }
     }
 }
@@ -243,17 +237,13 @@ mod tests {
 
     #[test]
     fn visibility_scopes() {
-        use std::path::PathBuf;
+        use crate::project::Scope;
         let mut m = Memory::default();
-        let here = [PathBuf::from("/Users/x/work/safetensors")];
+        let here = Scope { dir: "/Users/x/work/safetensors".into(), keys: vec!["st".into()] };
         assert!(m.visible_in(&here));
-        m.extra.insert("visibility".into(), "project:safetensors".into());
+        m.extra.insert("visibility".into(), "project:st".into());
         assert!(m.visible_in(&here));
-        assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/hippo")]));
-        m.extra.insert("visibility".into(), "project:/Users/x/work/safetensors".into());
-        assert!(m.visible_in(&here));
-        assert!(m.visible_in(&[PathBuf::from("/Users/x/work/safetensors/bindings/python")]));
-        assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/safetensors-old")]));
+        assert!(!m.visible_in(&Scope { dir: "/Users/x/work/safetensors".into(), keys: vec![] }));
         m.extra.insert("visibility".into(), "private".into());
         assert!(!m.visible_in(&here));
     }
