@@ -215,7 +215,12 @@ impl Out {
     /// Agents only see memories scoped to their working folder (same rule as MCP); humans see all.
     /// Keyed on the agent environment, not the output mode, so `--human` is no way around it.
     fn sees(&self, m: &Memory) -> bool {
-        self.sees_all() || m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>())
+        self.sees_all() || (m.status() != Some("forget") && m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>()))
+    }
+
+    /// Who is writing: `None` for the user, else the agent (its changes wait for review).
+    fn writer(&self) -> Option<String> {
+        (!self.sees_all()).then(|| hippo::safety::agent_name().unwrap_or_else(|| "agent".into()))
     }
 
     /// Human message (suppressed in agent mode).
@@ -766,7 +771,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                     bail!("not saved: looks like a secret ({what})\n  → Remove it, or pass --allow-secret if you really mean it");
                 }
             }
-            let commit = v.remember(&m)?;
+            let commit = v.remember_by(&m, out.writer().as_deref())?;
             let path = v.memory_path(name);
             out.done(json!({"path": path, "commit": commit, "changed": commit.is_some()}), || match &commit {
                 Some(c) => format!("{} saved {} {}", green("✓"), pretty_path(&path), dim(&c[..8])),
@@ -821,9 +826,15 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Rm { name } => {
             let v = open_vault(cli)?;
-            if !v.read_memory(name).is_ok_and(|m| out.sees(&m)) || !v.forget(name)? {
+            if !v.read_memory(name).is_ok_and(|m| out.sees(&m)) {
                 bail!("no memory named `{name}`");
             }
+            if let Some(a) = out.writer() {
+                v.request_forget(name, &a)?;
+                out.done(json!({"removed": false, "pending_review": name}), || format!("{name} will be removed once the user approves (`hippo review`)"));
+                return Ok(());
+            }
+            v.forget(name)?;
             out.done(json!({"removed": name}), || {
                 format!("{} removed {name} (still in history: `git -C {} log -- memories/`)", green("✓"), pretty_path(&v.root))
             });
