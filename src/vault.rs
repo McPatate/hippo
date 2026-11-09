@@ -244,6 +244,75 @@ impl Vault {
         self.commit_one_locked(&rel, &format!("forget: {}", slugify(name)))?;
         Ok(true)
     }
+
+    /// An agent's forget: the memory is hidden from agents and removed once the user approves.
+    pub fn request_forget(&self, name: &str, agent: &str) -> Result<bool> {
+        let _lock = self.lock()?;
+        let Ok(mut m) = self.read_memory(name) else { return Ok(false) };
+        m.extra.insert("by".into(), agent.into());
+        m.extra.insert("status".into(), "forget".into());
+        let rel = self.rel(&self.write_memory(&m)?);
+        self.commit_one_locked(&rel, &format!("forget (pending review): {}", slugify(name)))?;
+        Ok(true)
+    }
+
+    /// Memories with an agent change the user hasn't reviewed yet, oldest first.
+    pub fn pending_review(&self) -> Result<Vec<Memory>> {
+        let mut out: Vec<Memory> = self.list()?.into_iter().filter(Memory::needs_review).collect();
+        out.sort_by_key(|m| m.updated());
+        Ok(out)
+    }
+
+    /// The file as the user last approved it (`None` if there is no approved version).
+    pub fn approved_version(&self, name: &str) -> Result<Option<String>> {
+        let rel = self.rel(&self.memory_path(name));
+        for sha in self.git.run(["log", "--format=%H", "--", &rel])?.lines() {
+            let shown = self.git.try_run(["show", &format!("{sha}:{rel}")])?;
+            if !shown.success {
+                return Ok(None); // deleted at that point: nothing approved since
+            }
+            if !Memory::parse(name, &shown.stdout).needs_review() {
+                return Ok(Some(shown.stdout));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Accept an agent's change: the draft becomes confirmed, or the forget happens.
+    pub fn approve(&self, name: &str) -> Result<Option<String>> {
+        let _lock = self.lock()?;
+        let mut m = self.read_memory(name)?;
+        let path = self.memory_path(name);
+        let rel = self.rel(&path);
+        let msg = if m.status() == Some("forget") {
+            fs::remove_file(&path)?;
+            format!("forget: {} (approved)", m.name)
+        } else {
+            m.extra.remove("status");
+            self.write_memory(&m)?;
+            format!("approve: {}", m.name)
+        };
+        self.commit_one_locked(&rel, &msg)
+    }
+
+    /// Undo an agent's change: back to the last approved version, or gone if there is none.
+    pub fn reject(&self, name: &str) -> Result<Option<String>> {
+        let approved = self.approved_version(name)?;
+        let _lock = self.lock()?;
+        let path = self.memory_path(name);
+        match approved {
+            Some(text) => atomic_write(&path, text.as_bytes())?,
+            None => fs::remove_file(&path)?,
+        }
+        self.commit_one_locked(&self.rel(&path), &format!("reject: {}", slugify(name)))
+    }
+
+    /// When the memory was last committed (for files without an `updated` field).
+    pub fn last_changed(&self, name: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+        let rel = self.rel(&self.memory_path(name));
+        let t = self.git.run(["log", "-1", "--format=%ct", "--", &rel]).ok()?;
+        chrono::DateTime::from_timestamp(t.trim().parse().ok()?, 0)
+    }
 }
 
 pub fn has_conflict_markers(text: &str) -> bool {
