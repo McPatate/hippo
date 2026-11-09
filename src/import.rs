@@ -105,7 +105,8 @@ fn sources(from: &Path) -> Result<Vec<(String, PathBuf)>> {
     Ok(out)
 }
 
-pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Result<(Vec<Planned>, Option<String>)> {
+/// `agent`: who runs the import, if not the user (then imported memories are drafts to review).
+pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool, agent: Option<&str>) -> Result<(Vec<Planned>, Option<String>)> {
     let existing = vault.list()?;
     // Previously imported memories, keyed by (claude project, source file stem).
     let mut imported: HashMap<(String, String), Memory> = HashMap::new();
@@ -222,9 +223,11 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool) -> Resu
     let mut fresh = Registry::load(&vault.root)?;
     fresh.merge(&reg);
     fresh.save(&vault.root)?;
-    for ((_, m, _), p) in memories.iter().zip(&plans) {
+    for ((_, m, prior), p) in memories.iter().zip(&plans) {
         if p.status != Status::Unchanged {
-            vault.write_memory(m)?;
+            let mut m = m.clone();
+            m.stamp(prior.as_ref(), agent);
+            vault.write_memory(&m)?;
         }
     }
     let msg = format!(

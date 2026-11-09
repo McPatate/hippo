@@ -312,7 +312,7 @@ async fn import_claude_code_memories() {
         std::fs::create_dir_all(&d).unwrap();
         std::fs::write(d.join(file), text).unwrap();
     }
-    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false, None).unwrap();
     assert_eq!(plans.len(), 3, "MEMORY.md index is skipped");
     assert!(commit.is_some());
     let tone = v.read_memory("feedback-tone").unwrap();
@@ -326,10 +326,10 @@ async fn import_claude_code_memories() {
     assert!(src.join("-Users-x-work-alpha/memory/feedback_tone.md").exists(), "source untouched");
 
     // Re-running is a no-op; an edited source updates the same memory in place.
-    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false, None).unwrap();
     assert!(commit.is_none() && plans.iter().all(|p| p.status == hippo::import::Status::Unchanged), "{plans:?}");
     std::fs::write(src.join("-Users-x-work-alpha/memory/feedback_tone.md"), "---\nname: Tone of voice\ndescription: be concise\nmetadata:\n  type: feedback\n---\nBe very concise.\n").unwrap();
-    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    let (plans, commit) = hippo::import::plan_and_import_claude(&v, &src, false, None).unwrap();
     assert!(commit.is_some());
     assert_eq!(hippo::import::count(&plans, hippo::import::Status::Updated), 1);
     assert_eq!(v.list().unwrap().len(), 3, "no duplicates");
@@ -386,7 +386,7 @@ async fn import_recognises_legacy_project_named_stems() {
         v.write_memory(&m).unwrap();
     }
     v.save("legacy import").unwrap();
-    let (plans, _) = hippo::import::plan_and_import_claude(&v, &src, false).unwrap();
+    let (plans, _) = hippo::import::plan_and_import_claude(&v, &src, false, None).unwrap();
     assert_eq!(hippo::import::count(&plans, hippo::import::Status::New), 0, "{plans:?}");
     let names: Vec<String> = v.list().unwrap().into_iter().map(|m| m.name).collect();
     assert_eq!(names, ["notes", "picklescan-venv"], "matched in place, no duplicates");

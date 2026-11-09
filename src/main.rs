@@ -419,9 +419,9 @@ struct ImportReport {
     memories: Vec<hippo::import::Planned>,
 }
 
-async fn import_claude(v: &Vault, from: &std::path::Path, dry_run: bool) -> Result<ImportReport> {
+async fn import_claude(v: &Vault, from: &std::path::Path, dry_run: bool, agent: Option<&str>) -> Result<ImportReport> {
     use hippo::import::{Status, count};
-    let (plans, commit) = hippo::import::plan_and_import_claude(v, from, dry_run)?;
+    let (plans, commit) = hippo::import::plan_and_import_claude(v, from, dry_run, agent)?;
     if commit.is_some() {
         hippo::log::record(&v.root, "import", json!({"source": "claude-code", "new": count(&plans, Status::New), "updated": count(&plans, Status::Updated)}));
     }
@@ -567,10 +567,10 @@ async fn cmd_init(out: &Out, cli: &Cli, path: Option<PathBuf>, remote: Option<St
     let mut imported = None;
     let from = hippo::import::default_claude_dir();
     if from.is_dir() {
-        let plan = import_claude(&vault, &from, true).await?;
+        let plan = import_claude(&vault, &from, true, out.writer().as_deref()).await?;
         let todo = plan.new + plan.updated;
         if todo > 0 && (interactive || yes) && ask(&format!("Import {todo} memories from Claude Code? (read-only: Claude's copies stay)"))? {
-            let r = import_claude(&vault, &from, false).await?;
+            let r = import_claude(&vault, &from, false, out.writer().as_deref()).await?;
             out.say(format!("  {} imported {} new, {} updated", green("✓"), r.new, r.updated));
             imported = Some(r);
         }
@@ -1086,7 +1086,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         Cmd::Import { source: ImportSource::ClaudeCode { from, dry_run } } => {
             let v = open_vault(cli)?;
             let from = from.clone().unwrap_or_else(hippo::import::default_claude_dir);
-            let r = import_claude(&v, &from, *dry_run).await?;
+            let r = import_claude(&v, &from, *dry_run, out.writer().as_deref()).await?;
             out.done(json!(r), || {
                 let mut s = String::new();
                 for p in r.memories.iter().filter(|p| p.status != hippo::import::Status::Unchanged) {
