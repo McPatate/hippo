@@ -43,6 +43,8 @@ pub struct Snapshot {
     pub backup: Backup,
     pub verified_at: Option<DateTime<Utc>>,
     pub count: usize,
+    /// Agent changes waiting for `hippo review`.
+    pub review: usize,
     pub remote: Option<String>,
 }
 
@@ -52,8 +54,12 @@ fn describe(e: &Value) -> Option<(Kind, String)> {
             let first = e["message"].as_str().unwrap_or("").lines().next().unwrap_or("").to_string();
             if let Some(p) = first.strip_prefix("remember: ") {
                 (Kind::Write, format!("remembered {}", p.trim_start_matches("memories/").trim_end_matches(".md")))
-            } else if let Some(n) = first.strip_prefix("forget: ") {
+            } else if let Some(n) = first.strip_prefix("forget: ").or(first.strip_prefix("forget (pending review): ")) {
                 (Kind::Forget, format!("forgot {n}"))
+            } else if let Some(n) = first.strip_prefix("approve: ") {
+                (Kind::Write, format!("approved {n}"))
+            } else if let Some(n) = first.strip_prefix("reject: ") {
+                (Kind::Forget, format!("rejected {n}"))
             } else if first.starts_with("import ") {
                 (Kind::Write, first.replacen("import", "imported", 1))
             } else {
@@ -101,16 +107,21 @@ pub fn snapshot(vault: &Path) -> Option<Snapshot> {
     } else {
         Backup::Pending
     };
-    let count = std::fs::read_dir(vault.join("memories"))
-        .map(|d| d.filter_map(|e| e.ok()).filter(|e| e.path().extension().is_some_and(|x| x == "md")).count())
-        .unwrap_or(0);
+    let files: Vec<_> = std::fs::read_dir(vault.join("memories"))
+        .map(|d| d.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "md")).collect())
+        .unwrap_or_default();
+    let review = files
+        .iter()
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| crate::memory::Memory::parse("", &t).needs_review()))
+        .count();
     Some(Snapshot {
         name: buddy.name,
         color: buddy.color.unwrap_or_else(|| "lavender".into()),
         last,
         backup,
         verified_at: state.verified_at,
-        count,
+        count: files.len(),
+        review,
         remote: cfg.remote.map(|r| r.display()),
     })
 }
@@ -138,6 +149,9 @@ pub fn line(s: &Snapshot, color: bool, now: DateTime<Utc>) -> String {
         parts.push(format!("{} {}", paint(color, if busy { "1;35" } else { "35" }, &format!("{who}{what}")), paint(color, "2", &crate::util::ago(*at))));
     }
     parts.push(backup_text(&s.backup, color));
+    if s.review > 0 {
+        parts.push(paint(color, "33", &format!("✎ {} to review — `hippo review`", s.review)));
+    }
     parts.push(paint(color, "2", &format!("{} memories", s.count)));
     format!("🦛 {}", parts.join(&paint(color, "2", " · ")))
 }
@@ -352,6 +366,7 @@ mod tests {
             backup: Backup::Pending,
             verified_at: None,
             count: 1,
+            review: 0,
             remote: None,
         };
         assert!(matches!(mood(&s, now), Mood::Chomp | Mood::Idle));
