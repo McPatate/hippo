@@ -259,7 +259,7 @@ impl HippoServer {
     async fn recall(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let m = self.read_visible(&vault, &a.name)?;
-        crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name}));
+        crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name, "shared": "full text"}));
         self.reply(&vault, format!("recalled `{}`", m.name), m.render())
     }
 
@@ -277,6 +277,7 @@ impl HippoServer {
             .map(|m| format!("- {} [{}] {}", m.name, m.kind, m.description))
             .collect();
         let filter = a.kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
+        crate::log::record(&vault.root, "list", serde_json::json!({"count": lines.len(), "shared": "descriptions"}));
         self.reply(&vault, format!("listed {} memories{filter}", lines.len()), lines.join("\n"))
     }
 
@@ -298,12 +299,17 @@ impl HippoServer {
             .take(limit)
             .collect();
         let names: Vec<&str> = hits.iter().take(3).map(|h| h.name.as_str()).collect();
-        crate::log::record(&vault.root, "search", serde_json::json!({"query": &a.query, "hits": hits.len()}));
+        let snippets = crate::config::GlobalConfig::load().is_ok_and(|g| g.search_snippets);
+        crate::log::record(&vault.root, "search", serde_json::json!({
+            "query": &a.query,
+            "hits": hits.len(),
+            "names": hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            "shared": if snippets { "descriptions + snippets" } else { "descriptions" },
+        }));
         let receipt = match hits.len() {
             0 => format!("searched “{}” → no matches", a.query),
             n => format!("searched “{}” → {n} match(es): {}{}", a.query, names.join(", "), if n > 3 { ", …" } else { "" }),
         };
-        let snippets = crate::config::GlobalConfig::load().is_ok_and(|g| g.search_snippets);
         let body = hits
             .iter()
             .map(|h| match snippets {
