@@ -80,6 +80,11 @@ enum Cmd {
     },
     /// Print a memory
     Show { name: String },
+    /// Projects that `project:<key>` memories are scoped to, and the folders they match
+    Project {
+        #[command(subcommand)]
+        cmd: Option<ProjectCmd>,
+    },
     /// Approve or reject what agents changed (agent writes are drafts until you do)
     Review,
     /// Full-text search
@@ -194,6 +199,12 @@ enum ImportSource {
         #[arg(long)]
         dry_run: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ProjectCmd {
+    /// Add a folder to a project (default: the current folder); its repo is recognized anywhere
+    Link { key: String, dir: Option<PathBuf> },
 }
 
 #[derive(Subcommand)]
@@ -828,6 +839,47 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body,
                        "provenance": m.provenance(m.updated().is_none().then(|| v.last_changed(&m.name)).flatten())}),
                 || m.render(),
+            );
+            Ok(())
+        }
+        Cmd::Project { cmd } => {
+            use hippo::project::{Ident, Registry, Scope};
+            let v = open_vault(cli)?;
+            let cwd = std::env::current_dir()?;
+            if let Some(ProjectCmd::Link { key, dir }) = cmd {
+                if !out.sees_all() {
+                    bail!("linking folders to projects changes what agents can read, so only you can do it\n  → Run it yourself in a terminal");
+                }
+                let id = Ident::of(&dir.clone().map(|d| expand_tilde(&d.to_string_lossy())).unwrap_or(cwd));
+                let key = hippo::memory::slugify(key);
+                let mut reg = Registry::load(&v.root);
+                reg.learn(&key, &id);
+                v.save_registry(&reg, &format!("projects: link {} to {key}", id.home().display()))?;
+                out.done(json!({"linked": key, "dir": id.home()}), || format!("{} {} → {key}", green("✓"), pretty_path(id.home())));
+                return Ok(());
+            }
+            let here = Scope::here(&v, &cwd);
+            let reg = Registry::load(&v.root);
+            let memories = v.list()?;
+            let count = |k: &str| memories.iter().filter(|m| m.visibility() == hippo::memory::Visibility::Project(k.into())).count();
+            let rows: Vec<_> = reg.projects.iter().filter(|(k, _)| out.sees_all() || here.keys.contains(k)).collect();
+            out.done(
+                json!({"here": here.keys, "projects": rows.iter().map(|(k, p)| json!({"key": k, "memories": count(k), "paths": p.paths, "roots": p.roots})).collect::<Vec<_>>()}),
+                || {
+                    let mut t = String::new();
+                    let w = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+                    for (k, p) in &rows {
+                        let found = p.paths.iter().filter(|q| std::path::Path::new(q).exists()).map(|q| pretty_path(std::path::Path::new(q))).collect::<Vec<_>>();
+                        let what = match (found.is_empty(), p.paths.is_empty() && p.roots.is_empty()) {
+                            (_, true) => yellow("not linked to any folder — `hippo project link <key> <dir>`"),
+                            (true, _) => dim("not on this machine"),
+                            _ => found.join(", "),
+                        };
+                        let mark = if here.keys.contains(k) { green("●") } else { " ".into() };
+                        t += &format!("{mark} {}{} {:>3} memories  {what}\n", bold(k), " ".repeat(w - k.len()), count(k));
+                    }
+                    t
+                },
             );
             Ok(())
         }
