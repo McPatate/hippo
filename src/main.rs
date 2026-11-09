@@ -204,10 +204,15 @@ struct Out {
 }
 
 impl Out {
+    /// A human at a terminal (no agent environment, not agent mode).
+    fn sees_all(&self) -> bool {
+        !self.agent && hippo::safety::detected_agent().is_none()
+    }
+
     /// Agents only see memories scoped to their working folder (same rule as MCP); humans see all.
     /// Keyed on the agent environment, not the output mode, so `--human` is no way around it.
     fn sees(&self, m: &Memory) -> bool {
-        (!self.agent && hippo::safety::detected_agent().is_none()) || m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>())
+        self.sees_all() || m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>())
     }
 
     /// Human message (suppressed in agent mode).
@@ -788,7 +793,11 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 .take(*limit)
                 .collect();
             out.done(
-                json!({"hits": hits.iter().map(|h| json!({"name": h.name, "description": h.description, "snippet": h.snippet})).collect::<Vec<_>>()}),
+                // Privacy mode: no snippets for agents unless enabled.
+                json!({"hits": hits.iter().map(|h| {
+                    let snip = !out.sees_all() && !GlobalConfig::load().is_ok_and(|g| g.search_snippets);
+                    json!({"name": h.name, "description": h.description, "snippet": if snip { None } else { Some(&h.snippet) }})
+                }).collect::<Vec<_>>()}),
                 || {
                     if hits.is_empty() {
                         return "no matches".into();
