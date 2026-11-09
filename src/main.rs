@@ -204,6 +204,12 @@ struct Out {
 }
 
 impl Out {
+    /// Agents only see memories scoped to their working folder (same rule as MCP); humans see all.
+    /// Keyed on the agent environment, not the output mode, so `--human` is no way around it.
+    fn sees(&self, m: &Memory) -> bool {
+        (!self.agent && hippo::safety::detected_agent().is_none()) || m.visible_in(&std::env::current_dir().into_iter().collect::<Vec<_>>())
+    }
+
     /// Human message (suppressed in agent mode).
     fn say(&self, s: impl AsRef<str>) {
         if !self.agent {
@@ -755,7 +761,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Ls { kind } => {
             let v = open_vault(cli)?;
-            let list: Vec<Memory> = v.list()?.into_iter().filter(|m| kind.as_ref().is_none_or(|k| &m.kind == k)).collect();
+            let list: Vec<Memory> = v.list()?.into_iter().filter(|m| kind.as_ref().is_none_or(|k| &m.kind == k) && out.sees(m)).collect();
             out.done(
                 json!({"memories": list.iter().map(|m| json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags})).collect::<Vec<_>>()}),
                 || list.iter().map(|m| format!("{:<32} {:<10} {}\n", bold(&m.name), dim(&m.kind), m.description)).collect(),
@@ -764,7 +770,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Show { name } => {
             let v = open_vault(cli)?;
-            let m = v.read_memory(name)?;
+            let m = v.read_memory(name).ok().filter(|m| out.sees(m)).with_context(|| format!("no memory named `{name}`"))?;
             out.done(
                 json!({"name": m.name, "type": m.kind, "description": m.description, "tags": m.tags, "body": m.body}),
                 || m.render(),
@@ -775,7 +781,12 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let v = open_vault(cli)?;
             let mut idx = Index::open(&v.root)?;
             idx.refresh(&v.memories_dir())?;
-            let hits = idx.search(&query.join(" "), *limit)?;
+            let hits: Vec<_> = idx
+                .search(&query.join(" "), *limit * 4)?
+                .into_iter()
+                .filter(|h| v.read_memory(&h.name).is_ok_and(|m| out.sees(&m)))
+                .take(*limit)
+                .collect();
             out.done(
                 json!({"hits": hits.iter().map(|h| json!({"name": h.name, "description": h.description, "snippet": h.snippet})).collect::<Vec<_>>()}),
                 || {
@@ -791,7 +802,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Rm { name } => {
             let v = open_vault(cli)?;
-            if !v.forget(name)? {
+            if !v.read_memory(name).is_ok_and(|m| out.sees(&m)) || !v.forget(name)? {
                 bail!("no memory named `{name}`");
             }
             out.done(json!({"removed": name}), || {
