@@ -791,6 +791,9 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             }
             let v = open_vault(cli)?;
             let existing = v.read_memory(name).ok();
+            if existing.as_ref().is_some_and(|m| !out.sees(&v, m)) {
+                bail!("the name `{name}` is taken outside this project; pick another");
+            }
             let body = read_body(out.agent, message.clone(), existing.as_ref().map(|e| e.body.as_str()))?;
             let m = Memory {
                 name: name.clone(),
