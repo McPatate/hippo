@@ -95,6 +95,37 @@ fn one_line(s: &str) -> String {
     s.replace(['\n', '\r'], " ").trim().to_string()
 }
 
+/// Who may see a memory: frontmatter `visibility: all | private | project:<name>` (default `all`).
+/// `private` memories never leave hippo over MCP; `project:<name>` ones only reach agents whose
+/// working folder is named `<name>` (or is that absolute path).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Visibility {
+    All,
+    Private,
+    Project(String),
+}
+
+impl Memory {
+    pub fn visibility(&self) -> Visibility {
+        match self.extra.get("visibility").map(|v| v.trim()) {
+            Some("private") => Visibility::Private,
+            Some(v) if v.starts_with("project:") => Visibility::Project(v["project:".len()..].trim().to_string()),
+            _ => Visibility::All,
+        }
+    }
+
+    /// Visible to an agent working in `roots`?
+    pub fn visible_in(&self, roots: &[std::path::PathBuf]) -> bool {
+        match self.visibility() {
+            Visibility::All => true,
+            Visibility::Private => false,
+            Visibility::Project(p) => roots.iter().any(|r| {
+                r.as_os_str() == p.as_str() || r.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(&p))
+            }),
+        }
+    }
+}
+
 /// Turn a free-form name into a safe file stem: lowercase, `[a-z0-9-]`, no path tricks.
 pub fn slugify(name: &str) -> String {
     let mut out = String::new();
@@ -136,6 +167,21 @@ mod tests {
         let m = Memory::parse("plain", "# Hello\nworld\n");
         assert_eq!(m.name, "plain");
         assert_eq!(m.body, "# Hello\nworld\n");
+    }
+
+    #[test]
+    fn visibility_scopes() {
+        use std::path::PathBuf;
+        let mut m = Memory::default();
+        let here = [PathBuf::from("/Users/x/work/safetensors")];
+        assert!(m.visible_in(&here));
+        m.extra.insert("visibility".into(), "project:safetensors".into());
+        assert!(m.visible_in(&here));
+        assert!(!m.visible_in(&[PathBuf::from("/Users/x/work/hippo")]));
+        m.extra.insert("visibility".into(), "project:/Users/x/work/safetensors".into());
+        assert!(m.visible_in(&here));
+        m.extra.insert("visibility".into(), "private".into());
+        assert!(!m.visible_in(&here));
     }
 
     #[test]
