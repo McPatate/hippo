@@ -6,6 +6,8 @@ use serde_json::{Value, json};
 use std::io::Write;
 use std::path::Path;
 
+const CAP: u64 = 4 << 20;
+
 pub fn record(vault: &Path, action: &str, details: Value) {
     let mut entry = json!({"at": crate::util::now().to_rfc3339(), "action": action});
     if let (Some(e), Value::Object(d)) = (entry.as_object_mut(), details) {
@@ -15,6 +17,10 @@ pub fn record(vault: &Path, action: &str, details: Value) {
         entry["via"] = json!(crate::safety::agent_name().unwrap_or(agent));
     }
     let path = vault.join(".hippo").join("log.jsonl");
+    // Bounded: past `CAP`, the log becomes `log.1.jsonl` (the one before is dropped).
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > CAP) {
+        let _ = std::fs::rename(&path, path.with_file_name("log.1.jsonl"));
+    }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{entry}");
     }
