@@ -23,10 +23,11 @@ pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
         return String::new();
     }
     let mut out = format!(
-        "🦛 hippo: {} memories for this session (name [type] description). `recall` the ones relevant \
+        "🦛 hippo: {} memories for this session{} (name [type] description). `recall` the ones relevant \
          to the task, `search_memories` for anything else. They are general guidance from past \
          sessions and can be outdated; what the user says now wins.\n",
-        seen.len()
+        seen.len(),
+        scope.keys.first().map(|k| format!(" in project `{k}`")).unwrap_or_default()
     );
     for (i, m) in seen.iter().enumerate() {
         let line = format!("- {} [{}]{} {}\n", m.name, m.kind, if m.needs_review() { " (unconfirmed)" } else { "" }, m.description);
