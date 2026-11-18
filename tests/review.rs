@@ -116,3 +116,56 @@ fn registry_is_never_overwritten_when_unreadable_or_learned_from_subfolders() {
     assert!(v.update_registry("x", |_| ()).is_err());
     assert_eq!(std::fs::read_to_string(v.root.join(FILE)).unwrap(), conflicted);
 }
+
+#[test]
+fn claude_auto_memory_is_collected_once_per_change() {
+    use hippo::import::{Status, count, plan_and_import_claude};
+    let (t, v) = vault();
+    let dir = t.path().join("claude/-Users-x-work-alpha/memory");
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |f: &str, body: &str| std::fs::write(dir.join(f), format!("---\nname: {f}\ndescription: d\ntype: feedback\n---\n{body}\n")).unwrap();
+    let import = || plan_and_import_claude(&v, &t.path().join("claude"), false, AGENT).unwrap().0;
+    write("tone.md", "Be concise.");
+    write("gone.md", "Old rule.");
+    write("key.md", "token hf_abcdefghijklmnopqrstuvwxyz0123456789");
+    let p = import();
+    assert_eq!((count(&p, Status::New), count(&p, Status::Secret)), (2, 1), "{p:?}");
+    assert!(v.read_memory("key").is_err(), "secrets stay out");
+    assert_eq!(v.read_memory("tone").unwrap().status(), Some("draft"));
+
+    // The user edits one and deletes the other in hippo: Claude's unchanged files don't undo that.
+    let mut tone = v.read_memory("tone").unwrap();
+    tone.body = "Be concise, no emojis.\n".into();
+    v.remember(&tone).unwrap();
+    v.reject("gone").unwrap();
+    assert!(import().iter().all(|p| p.status == Status::Unchanged));
+    assert!(v.read_memory("tone").unwrap().body.contains("no emojis"));
+    assert!(v.read_memory("gone").is_err());
+
+    // Claude changes its file: that change comes in, as a draft to review.
+    write("tone.md", "Be concise. Use French.");
+    assert_eq!(count(&import(), Status::Updated), 1);
+    let m = v.read_memory("tone").unwrap();
+    assert!(m.body.contains("French") && m.needs_review());
+}
+
+#[test]
+fn vaults_imported_before_the_ledger_skip_what_claude_has_not_touched() {
+    use hippo::import::{LEDGER, Status, count, plan_and_import_claude};
+    let (t, v) = vault();
+    let from = t.path().join("claude");
+    let dir = from.join("-Users-x-work-alpha/memory");
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["kept.md", "deleted.md"] {
+        std::fs::write(dir.join(f), format!("---\nname: {f}\ntype: feedback\n---\nx\n")).unwrap();
+    }
+    plan_and_import_claude(&v, &from, false, None).unwrap();
+    // As if imported by an older hippo: no ledger. The user deleted one since.
+    std::fs::remove_file(v.root.join(LEDGER)).unwrap();
+    v.forget("deleted").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(1100)); // commit times are in seconds
+    std::fs::write(dir.join("new.md"), "---\nname: new\ntype: feedback\n---\ny\n").unwrap();
+    let p = plan_and_import_claude(&v, &from, false, None).unwrap().0;
+    assert_eq!((count(&p, Status::New), count(&p, Status::Unchanged)), (1, 2), "{p:?}");
+    assert!(v.read_memory("deleted").is_err());
+}

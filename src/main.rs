@@ -416,6 +416,8 @@ struct ImportReport {
     new: usize,
     updated: usize,
     unchanged: usize,
+    /// Left out: they look like they hold a secret.
+    secret: usize,
     commit: Option<String>,
     backup_seq: Option<u64>,
     memories: Vec<hippo::import::Planned>,
@@ -436,6 +438,7 @@ async fn import_claude(v: &Vault, from: &std::path::Path, dry_run: bool, agent: 
         new: count(&plans, Status::New),
         updated: count(&plans, Status::Updated),
         unchanged: count(&plans, Status::Unchanged),
+        secret: count(&plans, Status::Secret),
         commit,
         backup_seq,
         memories: plans,
@@ -575,6 +578,9 @@ async fn cmd_init(out: &Out, cli: &Cli, path: Option<PathBuf>, remote: Option<St
             let r = import_claude(&vault, &from, false, out.writer().as_deref()).await?;
             out.say(format!("  {} imported {} new, {} updated", green("✓"), r.new, r.updated));
             imported = Some(r);
+        } else if todo > 0 {
+            // Not these: only what Claude writes from now on is collected.
+            hippo::import::skip_claude(&vault, &from)?;
         }
     }
 
@@ -1112,16 +1118,21 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             out.done(json!(r), || {
                 let mut s = String::new();
                 for p in r.memories.iter().filter(|p| p.status != hippo::import::Status::Unchanged) {
-                    let st = if p.status == hippo::import::Status::New { "new" } else { "updated" };
+                    let st = match p.status {
+                        hippo::import::Status::New => "new",
+                        hippo::import::Status::Secret => "secret?",
+                        _ => "updated",
+                    };
                     s += &format!("  {:<8} {:<44} {:<9} {}{}\n", st, p.name, p.kind, p.project, if p.renamed { "  (renamed: name collision)" } else { "" });
                 }
                 let verb = if *dry_run { "would import" } else { "imported" };
                 s += &format!(
-                    "{} {verb}: {} new, {} updated, {} already in hippo{}",
+                    "{} {verb}: {} new, {} updated, {} already in hippo{}{}",
                     if *dry_run { dim("…") } else { green("✓") },
                     r.new,
                     r.updated,
                     r.unchanged,
+                    if r.secret > 0 { format!(", {} left out (they look like they hold a secret)", r.secret) } else { String::new() },
                     r.backup_seq.map(|n| format!(" · backup #{n} verified")).unwrap_or_default()
                 );
                 s

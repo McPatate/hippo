@@ -14,6 +14,8 @@ pub enum Status {
     New,
     Updated,
     Unchanged,
+    /// Looks like it holds a secret: left out of the vault.
+    Secret,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -26,6 +28,52 @@ pub struct Planned {
     pub status: Status,
 }
 
+/// What each Claude Code file looked like when hippo last took it (`imported.toml`, synced).
+/// A file is only imported again once Claude changes it, so what the user edits, merges or
+/// deletes in hippo stays that way.
+pub const LEDGER: &str = "imported.toml";
+
+#[derive(Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+struct Ledger {
+    /// `<claude project slug>/<file stem>` → hash of the file as imported.
+    #[serde(default)]
+    claude_code: BTreeMap<String, String>,
+}
+
+impl Ledger {
+    fn load(vault: &Path) -> Result<Option<Ledger>> {
+        match std::fs::read_to_string(vault.join(LEDGER)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+            Ok(t) => Ok(Some(toml::from_str(&t).with_context(|| format!("{LEDGER} in your vault is unreadable (an unresolved merge?)\n  → Fix it by hand, then retry"))?)),
+        }
+    }
+}
+
+fn hash(text: &str) -> String {
+    use sha2::Digest;
+    hex::encode(&sha2::Sha256::digest(text.as_bytes())[..8])
+}
+
+/// When the vault last imported from Claude Code, for vaults that did so before the ledger.
+fn last_import(vault: &Vault) -> Option<std::time::SystemTime> {
+    let t: u64 = vault.git.run(["log", "-1", "--format=%ct", "--grep=^import"]).ok()?.trim().parse().ok()?;
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t))
+}
+
+/// Mark Claude Code's current memories as seen without importing them (the user declined).
+pub fn skip_claude(vault: &Vault, from: &Path) -> Result<()> {
+    let _lock = vault.lock()?;
+    let mut ledger = Ledger::load(&vault.root)?.unwrap_or_default();
+    for (slug, path) in sources(from)? {
+        let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        ledger.claude_code.insert(format!("{slug}/{stem}"), hash(&std::fs::read_to_string(&path)?));
+    }
+    crate::util::atomic_write(&vault.root.join(LEDGER), toml::to_string(&ledger)?.as_bytes())?;
+    vault.commit_paths_locked(&[LEDGER.into()], "import: skip Claude Code's existing memories")?;
+    Ok(())
+}
+
 pub fn count(plans: &[Planned], s: Status) -> usize {
     plans.iter().filter(|p| p.status == s).count()
 }
@@ -33,7 +81,10 @@ pub fn count(plans: &[Planned], s: Status) -> usize {
 /// Claude Code stores memories in `~/.claude/projects/<project-slug>/memory/*.md`
 /// (one fact per file, YAML frontmatter, plus a `MEMORY.md` index we skip).
 pub fn default_claude_dir() -> PathBuf {
-    dirs::home_dir().unwrap_or_default().join(".claude").join("projects")
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(d) => PathBuf::from(d).join("projects"),
+        None => dirs::home_dir().unwrap_or_default().join(".claude").join("projects"),
+    }
 }
 
 /// `-Users-luc-Documents-work-safetensors` → `safetensors`, for tags and collision prefixes.
@@ -147,10 +198,25 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool, agent: 
     let mut memories = vec![];
     let mut renames: BTreeMap<String, HashMap<String, String>> = BTreeMap::new();
     let mut reg = Registry::load(&vault.root)?;
+    let before = Ledger::load(&vault.root)?;
+    // Before the ledger, a file Claude hasn't touched since the last import is already in, or
+    // was removed on purpose.
+    let cutoff = if before.is_none() && !imported.is_empty() { last_import(vault) } else { None };
+    let mut ledger = Ledger { claude_code: before.as_ref().map(|l| l.claude_code.clone()).unwrap_or_default() };
+    let mut taken = vec![]; // per source: already imported in this version
 
     for (slug, path) in sources(from)? {
         let text = std::fs::read_to_string(&path)?;
         let stem = path.file_stem().unwrap().to_string_lossy().to_string();
+        let id = format!("{slug}/{stem}");
+        let h = hash(&text);
+        taken.push(match ledger.claude_code.get(&id) {
+            Some(prev) => *prev == h,
+            // Commit times are in whole seconds.
+            None => cutoff.is_some_and(|t| std::fs::metadata(&path).and_then(|m| m.modified()).is_ok_and(|m| m < t + std::time::Duration::from_secs(1))),
+        });
+        ledger.claude_code.insert(id, h);
+        let secret = !taken[taken.len() - 1] && !crate::secrets::heuristic(&text).is_empty();
         let mut m = Memory::parse(&stem, &text);
         let original_name = m.name.clone();
         // The file stem is Claude Code's stable id; frontmatter names are sometimes long titles.
@@ -195,7 +261,8 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool, agent: 
         map.insert(original_name, name.clone());
         map.insert(stem.clone(), name.clone());
         m.name = name.clone();
-        plans.push(Planned { source: path.clone(), name: name.clone(), kind: m.kind.clone(), project, renamed: name != base, status: Status::New });
+        let status = if secret { Status::Secret } else { Status::New };
+        plans.push(Planned { source: path.clone(), name: name.clone(), kind: m.kind.clone(), project, renamed: name != base, status });
         memories.push((slug, m, prior.cloned()));
     }
 
@@ -209,22 +276,30 @@ pub fn plan_and_import_claude(vault: &Vault, from: &Path, dry_run: bool, agent: 
             }
         }
         plans[i].status = match prior {
+            _ if taken[i] => Status::Unchanged,
+            _ if plans[i].status == Status::Secret => Status::Secret,
             None => Status::New,
             Some(p) if p.body == m.body && p.description == m.description && p.kind == m.kind && p.extra.get("visibility") == m.extra.get("visibility") => Status::Unchanged,
             Some(_) => Status::Updated,
         };
     }
 
-    if dry_run || plans.iter().all(|p| p.status == Status::Unchanged) {
+    let fresh_ledger = before.as_ref() != Some(&ledger);
+    let writes = plans.iter().any(|p| matches!(p.status, Status::New | Status::Updated));
+    if dry_run || (!writes && !fresh_ledger) {
         return Ok((plans, None));
     }
     let _lock = vault.lock()?;
+    crate::util::atomic_write(&vault.root.join(LEDGER), toml::to_string(&ledger)?.as_bytes())?;
+    if !writes {
+        return Ok((plans, vault.commit_paths_locked(&[LEDGER.into()], "import: note what Claude Code memories hippo has")?));
+    }
     // Merge with the registry as it is now: it may have changed since the start of the import.
     let mut fresh = Registry::load(&vault.root)?;
     fresh.merge(&reg);
     fresh.save(&vault.root)?;
     for ((_, m, prior), p) in memories.iter().zip(&plans) {
-        if p.status != Status::Unchanged {
+        if matches!(p.status, Status::New | Status::Updated) {
             let mut m = m.clone();
             m.stamp(prior.as_ref(), agent);
             vault.write_memory(&m)?;
