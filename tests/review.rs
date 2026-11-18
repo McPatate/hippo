@@ -119,7 +119,7 @@ fn registry_is_never_overwritten_when_unreadable_or_learned_from_subfolders() {
 
 #[test]
 fn claude_auto_memory_is_collected_once_per_change() {
-    use hippo::import::{Status, count, plan_and_import_claude};
+    use hippo::import::{Status, count, plan_and_import_claude, write_back_claude};
     let (t, v) = vault();
     let dir = t.path().join("claude/-Users-x-work-alpha/memory");
     std::fs::create_dir_all(&dir).unwrap();
@@ -142,16 +142,36 @@ fn claude_auto_memory_is_collected_once_per_change() {
     assert!(v.read_memory("tone").unwrap().body.contains("no emojis"));
     assert!(v.read_memory("gone").is_err());
 
-    // Claude changes its file: that change comes in, as a draft to review.
+
+    // Claude's folder follows: the edit is written back, the deleted one removed with its index line.
+    std::fs::write(dir.join("MEMORY.md"), "- [Tone](tone.md) — tone\n- [Gone](gone.md) — old\n").unwrap();
+    let from = t.path().join("claude");
+    let w = write_back_claude(&v, &from).unwrap();
+    assert_eq!((w.updated.len(), w.removed.len()), (1, 1));
+    let tone_file = std::fs::read_to_string(dir.join("tone.md")).unwrap();
+    assert!(tone_file.starts_with("---\nname: tone.md\n") && tone_file.contains("no emojis"), "{tone_file}");
+    assert!(!dir.join("gone.md").exists() && dir.join("key.md").exists(), "secrets were never imported: kept");
+    assert_eq!(std::fs::read_to_string(dir.join("MEMORY.md")).unwrap(), "- [Tone](tone.md) — tone\n");
+    assert!(import().iter().all(|p| p.status == Status::Unchanged), "writing back is not a Claude change");
+    let w = write_back_claude(&v, &from).unwrap();
+    assert!(w.updated.is_empty() && w.removed.is_empty());
+
+    // Claude changes its file: that change comes in as a draft, and Claude's file stays as it is
+    // until the user decides. Rejected: Claude's file goes back to the approved version.
     write("tone.md", "Be concise. Use French.");
     assert_eq!(count(&import(), Status::Updated), 1);
     let m = v.read_memory("tone").unwrap();
     assert!(m.body.contains("French") && m.needs_review());
+    assert!(write_back_claude(&v, &from).unwrap().updated.is_empty());
+    v.reject("tone").unwrap();
+    write_back_claude(&v, &from).unwrap();
+    let tone_file = std::fs::read_to_string(dir.join("tone.md")).unwrap();
+    assert!(tone_file.contains("no emojis") && !tone_file.contains("French"), "{tone_file}");
 }
 
 #[test]
 fn vaults_imported_before_the_ledger_skip_what_claude_has_not_touched() {
-    use hippo::import::{LEDGER, Status, count, plan_and_import_claude};
+    use hippo::import::{LEDGER, Status, count, plan_and_import_claude, write_back_claude};
     let (t, v) = vault();
     let from = t.path().join("claude");
     let dir = from.join("-Users-x-work-alpha/memory");
@@ -168,4 +188,22 @@ fn vaults_imported_before_the_ledger_skip_what_claude_has_not_touched() {
     let p = plan_and_import_claude(&v, &from, false, None).unwrap().0;
     assert_eq!((count(&p, Status::New), count(&p, Status::Unchanged)), (1, 2), "{p:?}");
     assert!(v.read_memory("deleted").is_err());
+    // Deleted in hippo after it was imported: Claude's copy goes too.
+    assert_eq!(write_back_claude(&v, &from).unwrap().removed.len(), 1);
+    assert!(!dir.join("deleted.md").exists() && dir.join("kept.md").exists());
+}
+
+#[test]
+fn declined_claude_memories_are_never_touched() {
+    use hippo::import::{plan_and_import_claude, skip_claude, write_back_claude};
+    let (t, v) = vault();
+    let from = t.path().join("claude");
+    let dir = from.join("-Users-x-work-alpha/memory");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("mine.md"), "---\nname: mine\ntype: feedback\n---\nx\n").unwrap();
+    skip_claude(&v, &from).unwrap();
+    plan_and_import_claude(&v, &from, false, AGENT).unwrap();
+    assert!(v.read_memory("mine").is_err());
+    write_back_claude(&v, &from).unwrap();
+    assert!(dir.join("mine.md").exists());
 }

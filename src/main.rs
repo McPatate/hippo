@@ -427,6 +427,21 @@ struct ImportReport {
     memories: Vec<hippo::import::Planned>,
 }
 
+/// Bring Claude Code's memory files in line with hippo after the user's decisions.
+fn claude_follows(v: &Vault, out: &Out) {
+    let from = hippo::import::default_claude_dir();
+    if !from.is_dir() {
+        return;
+    }
+    match hippo::import::write_back_claude(v, &from) {
+        Ok(w) if !w.updated.is_empty() || !w.removed.is_empty() => {
+            out.say(format!("{} Claude Code's memory follows: {} updated, {} removed", green("✓"), w.updated.len(), w.removed.len()))
+        }
+        Ok(_) => {}
+        Err(e) => out.say(yellow(&format!("Claude Code's memory files not updated: {e:#}"))),
+    }
+}
+
 async fn import_claude(v: &Vault, from: &std::path::Path, dry_run: bool, agent: Option<&str>) -> Result<ImportReport> {
     use hippo::import::{Status, count};
     let (plans, commit) = hippo::import::plan_and_import_claude(v, from, dry_run, agent)?;
@@ -715,6 +730,9 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                     Ok(_) => {}
                     Err(e) => eprintln!("hippo: could not collect Claude Code's memories: {e:#}"),
                 }
+                if let Err(e) = hippo::import::write_back_claude(&v, &from) {
+                    eprintln!("hippo: could not update Claude Code's memories: {e:#}");
+                }
             }
             let scope = hippo::project::Scope::here(&v, &cwd);
             let idx = hippo::context::index(&v.list().unwrap_or_default(), &scope, hippo::context::BUDGET);
@@ -955,7 +973,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 return Ok(());
             }
             out.say(format!("🦛 {} change(s) to review\n", pending.len()));
-            for m in &pending {
+            'review: for m in &pending {
                 eprintln!("{} {}", bold(&m.name), dim(&format!("· {}", m.provenance(None))));
                 print_change(&v, m)?;
                 loop {
@@ -973,13 +991,14 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                             v.approve(&m.name).map(|_| green("✓ edited and approved"))?
                         }
                         "s" => dim("skipped"),
-                        "q" => return Ok(()),
+                        "q" => break 'review,
                         _ => continue,
                     };
                     eprintln!("  {done}\n");
                     break;
                 }
             }
+            claude_follows(&v, out);
             Ok(())
         }
         Cmd::Search { query, limit } => {
