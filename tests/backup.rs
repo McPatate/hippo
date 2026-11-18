@@ -391,3 +391,23 @@ async fn import_recognises_legacy_project_named_stems() {
     let names: Vec<String> = v.list().unwrap().into_iter().map(|m| m.name).collect();
     assert_eq!(names, ["notes", "picklescan-venv"], "matched in place, no duplicates");
 }
+
+#[test]
+fn cli_commits_are_backed_up_in_the_background() {
+    let e = env();
+    let v = e.vault("a");
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_hippo"))
+        .env("HIPPO_HOME", &e.root)
+        .args(["--human", "--vault"])
+        .arg(&v.root)
+        .args(["add", "prefers-rust", "-m", "Uses Rust."])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let head = v.git.head_fast().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while v.git.rev_parse(VERIFIED_REF).unwrap() != head {
+        assert!(std::time::Instant::now() < deadline, "no backup after the CLI commit");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}

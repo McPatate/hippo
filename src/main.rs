@@ -1226,12 +1226,42 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
     }
 }
 
+/// HEAD of a vault that backs up, for commands that don't back up themselves.
+fn backed_up_head(cli: &Cli) -> Option<Option<String>> {
+    if matches!(cli.cmd, Some(Cmd::Backup | Cmd::Sync | Cmd::Restore { .. } | Cmd::Mcp)) {
+        return None;
+    }
+    let v = Vault::open(&vault_path(cli).ok()?).ok().filter(|v| v.config.remote.is_some())?;
+    Some(v.git.head_fast().ok().flatten())
+}
+
+/// Commits made by the CLI (review, import at session start…) get backed up like the MCP
+/// server's, without making the command wait for the upload.
+fn backup_in_background(cli: &Cli) {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let mut c = std::process::Command::new(exe);
+    if let Some(v) = &cli.vault {
+        c.arg("--vault").arg(v);
+    }
+    c.arg("backup").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
+    let _ = c.spawn();
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
     let agent = cli.agent || (!cli.human && hippo::safety::detected_agent().is_some());
     let out = Out { agent, scope: Default::default() };
-    if let Err(e) = run(&cli, &out).await {
+    let before = backed_up_head(&cli);
+    let res = run(&cli, &out).await;
+    if let Some(before) = before
+        && backed_up_head(&cli).is_some_and(|after| after != before)
+    {
+        backup_in_background(&cli);
+    }
+    if let Err(e) = res {
         let msg = format!("{e:#}");
         if agent {
             let (error, hint) = match msg.split_once("\n  → ") {
