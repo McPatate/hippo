@@ -147,6 +147,8 @@ enum Cmd {
         #[arg(long, hide = true, env = "HIPPO_PIXEL", value_parser = clap::builder::BoolishValueParser::new())]
         pixel: bool,
     },
+    /// Memory index for an agent's new or compacted session (Claude Code `SessionStart` hook)
+    Context,
     /// Connect hippo to an agent harness (MCP + memory instructions + optional status line)
     Connect {
         #[command(subcommand)]
@@ -682,6 +684,23 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                     None => println!("{ours}"),
                 }
             }
+            Ok(())
+        }
+        Cmd::Context => {
+            // Hook input on stdin: the session's working folder. Never fail a session start.
+            let mut input = Vec::new();
+            if !std::io::stdin().is_terminal() {
+                let _ = std::io::stdin().read_to_end(&mut input);
+            }
+            let cwd = serde_json::from_slice::<Value>(&input)
+                .ok()
+                .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let Ok(v) = vault_path(cli).and_then(|p| Vault::open(&p)) else { return Ok(()) };
+            let scope = hippo::project::Scope::here(&v, &cwd);
+            let idx = hippo::context::index(&v.list().unwrap_or_default(), &scope, hippo::context::BUDGET);
+            hippo::log::record(&v.root, "context", json!({"count": idx.lines().count().saturating_sub(1), "shared": "descriptions"}));
+            print!("{idx}");
             Ok(())
         }
         Cmd::Connect { harness: Harness::Claude { no_statusline, pixel } } => {

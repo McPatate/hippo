@@ -6,6 +6,7 @@ pub mod backup;
 pub mod cleanup;
 pub mod config;
 pub mod connect;
+pub mod context;
 pub mod crypto;
 pub mod git;
 pub mod import;
