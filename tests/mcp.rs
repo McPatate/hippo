@@ -113,10 +113,7 @@ fn proposed_changes_apply_only_when_the_user_says_yes() {
     let mut c = Client::start(&v, tmp.path(), true);
     let (shown, out) = c.call("propose_changes", merge(), "decline");
     let shown = shown.expect("hippo shows a dialog");
-    assert!(
-        shown.contains("✗ delete atomic-prs (its content is in pr-style)"),
-        "{shown}"
-    );
+    assert_eq!(shown, "🦛 Apply 1 change to your memory?\n1 edit · 1 deletion (kept in history)\nTo see more first: decline and ask.");
     assert!(out.contains("nothing was applied"), "{out}");
     assert!(v.read_memory("atomic-prs").is_ok() && v.pending_changes().unwrap().is_empty());
 
@@ -156,7 +153,7 @@ fn pending_changes_are_decided_in_one_dialog() {
         "{list}"
     );
     let (shown, out) = c.call("decide_changes", json!({"approve": ["concise"]}), "accept");
-    assert!(shown.unwrap().contains("Apply:"));
+    assert_eq!(shown.unwrap(), "🦛 Decide these changes to your memory?\nApply 1: 1 new\nEvery diff: decline, then run `hippo review` in a terminal.");
     assert!(out.contains("1 applied"), "{out}");
     assert!(!v.read_memory("concise").unwrap().needs_review());
 }

@@ -127,6 +127,31 @@ pub fn describe(vault: &Vault, ops: &[Op], pending: bool) -> Vec<String> {
         .collect()
 }
 
+/// `describe` lines counted by kind, e.g. "10 renames · 9 deletions (kept in history)": short
+/// enough for a dialog, which shows only its first lines.
+pub fn tally(lines: &[String]) -> String {
+    let kind = |l: &String| match l.chars().next() {
+        Some('→') => "rename",
+        Some('◎') => "rescope",
+        Some('✗') => "deletion",
+        Some('+') => "new",
+        _ if l.contains("(seen ") => "rescope",
+        _ => "edit",
+    };
+    let mut out = vec![];
+    for k in ["rename", "rescope", "edit", "new", "deletion"] {
+        match lines.iter().filter(|l| kind(l) == k).count() {
+            0 => {}
+            n => out.push(format!("{n} {}{}", if k == "new" { "new" } else { k }, if n > 1 && k != "new" { "s" } else { "" })),
+        }
+    }
+    let mut t = out.join(" · ");
+    if lines.iter().any(|l| kind(l) == "deletion") {
+        t += " (kept in history)";
+    }
+    t
+}
+
 impl Vault {
     /// Apply `changes` in one commit: as drafts for the user to review, or `approved`, when the
     /// user said yes in a dialog hippo showed them. Checks every change before touching a file.

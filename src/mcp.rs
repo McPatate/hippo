@@ -607,14 +607,13 @@ impl HippoServer {
         if changes.is_empty() {
             return Err(McpError::invalid_params("no changes", None));
         }
-        let mut message = format!("🦛 Apply {} change{} to your memory?\n", changes.len(), if changes.len() == 1 { "" } else { "s" });
-        for c in &changes {
-            message += &format!("\n{}\n", c.title);
-            for l in crate::change::describe(&vault, &c.ops, false) {
-                message += &format!("  {l}\n");
-            }
-        }
-        message += "\nDeleted memories stay in history.";
+        let lines: Vec<String> = changes.iter().flat_map(|c| crate::change::describe(&vault, &c.ops, false)).collect();
+        let message = format!(
+            "🦛 Apply {} change{} to your memory?\n{}\nTo see more first: decline and ask.",
+            changes.len(),
+            if changes.len() == 1 { "" } else { "s" },
+            crate::change::tally(&lines)
+        );
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
         let receipt = match self.ask(&ctx, message, state, answers).await {
             Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
@@ -694,21 +693,15 @@ impl HippoServer {
         if yes.is_empty() && no.is_empty() {
             return Err(McpError::invalid_params("nothing to decide", None));
         }
-        let mut message = "🦛 Decide these changes to your memory?\n".to_string();
-        for (label, list) in [("Apply", &yes), ("Undo (back to the last version you approved)", &no)] {
-            if !list.is_empty() {
-                message += &format!("\n{label}:\n");
-                for p in list {
-                    message += &format!("  {}\n", p.meta.title);
-                    for l in crate::change::describe(&vault, &p.ops(), true) {
-                        message += &format!("    {l}\n");
-                    }
-                }
-            }
+        let lines = |list: &[&crate::change::Pending]| -> Vec<String> { list.iter().flat_map(|p| crate::change::describe(&vault, &p.ops(), true)).collect() };
+        let mut message = "🦛 Decide these changes to your memory?".to_string();
+        if !yes.is_empty() {
+            message += &format!("\nApply {}: {}", yes.len(), crate::change::tally(&lines(&yes)));
         }
-        if yes.iter().any(|p| p.members.iter().any(|m| m.status() == Some("forget"))) {
-            message += "\nDeleted memories stay in history.";
+        if !no.is_empty() {
+            message += &format!("\nUndo {} (back to what you last approved): {}", no.len(), crate::change::tally(&lines(&no)));
         }
+        message += "\nEvery diff: decline, then run `hippo review` in a terminal.";
         let receipt = match self.ask(&ctx, message, state, answers).await {
             Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
             Asked::Yes => {
