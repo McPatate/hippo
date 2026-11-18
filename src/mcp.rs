@@ -57,6 +57,8 @@ pub struct HippoServer {
     /// The agent's project (stdio servers start in its folder): scope for `project:` memories.
     /// (MCP roots would be the protocol answer, but they are deprecated by SEP-2577.)
     scope: Arc<std::sync::RwLock<Scope>>,
+    /// This server's run, one per agent session: links what one session read in the log.
+    session: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
@@ -77,6 +79,15 @@ pub struct RememberArgs {
     pub tags: Option<Vec<String>>,
     /// `all` (default), `private` (never returned to agents), `project` (only in this project), or `project:<key>`.
     pub visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct RecallArgs {
+    /// Memory name (as shown by list_memories).
+    pub name: String,
+    /// True when reading for a memory review (`/hippo review`), not to use it: it isn't counted as a use.
+    #[serde(default)]
+    pub review: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -180,11 +191,12 @@ fn handle(p: &crate::change::Pending) -> String {
 }
 
 /// Agents never get to store secrets: memories are sent to model providers.
-fn reject_secrets(text: &str) -> Result<(), McpError> {
+fn reject_secrets(vault: &Vault, text: &str) -> Result<(), McpError> {
     let found = crate::secrets::heuristic(text);
     if found.is_empty() {
         return Ok(());
     }
+    crate::log::record(&vault.root, "refused", serde_json::json!({"why": "secret", "kind": crate::secrets::describe(&found)}));
     Err(McpError::invalid_params(
         format!(
             "refused: this looks like it contains a secret ({}). Memories are sent to AI providers, so never store \
@@ -214,9 +226,17 @@ impl HippoServer {
             backup_running: Arc::default(),
             backup_again: Arc::default(),
             scope: Arc::new(std::sync::RwLock::new(scope)),
+            session: crate::util::random_hex(4),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
+    }
+
+    /// Log locally with where the agent works and its session (signals for the smart review).
+    fn log(&self, vault: &Vault, action: &str, mut details: serde_json::Value) {
+        details["project"] = serde_json::json!(self.scope.read().unwrap().keys.first());
+        details["session"] = serde_json::json!(self.session);
+        crate::log::record(&vault.root, action, details);
     }
 
     /// In scope, and not on its way out (an agent asked to forget it).
@@ -359,12 +379,13 @@ impl HippoServer {
                 return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project (this one) or project:<key>"), None));
             }
         }
-        reject_secrets(&m.render())?;
+        reject_secrets(&vault, &m.render())?;
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
         let commit = vault.remember_by(&m, Some(&agent)).map_err(err)?;
         let name = crate::memory::slugify(&m.name);
         let receipt = match &commit {
             Some(c) => {
+                self.log(&vault, "remember", serde_json::json!({"name": name, "new": !updated}));
                 self.schedule_backup();
                 let what = if m.description.is_empty() { String::new() } else { format!(" — {}", m.description) };
                 format!(
@@ -381,10 +402,15 @@ impl HippoServer {
     }
 
     #[tool(title = "🦛 Recall", description = "Read one memory by name.", annotations(read_only_hint = true, open_world_hint = false))]
-    async fn recall(&self, Parameters(a): Parameters<NameArgs>) -> Result<CallToolResult, McpError> {
+    async fn recall(&self, Parameters(a): Parameters<RecallArgs>) -> Result<CallToolResult, McpError> {
+        let t = std::time::Instant::now();
         let vault = self.vault()?;
         let m = self.read_visible(&vault, &a.name)?;
-        crate::log::record(&vault.root, "recall", serde_json::json!({"name": &m.name, "shared": "full text"}));
+        let mut d = serde_json::json!({"name": &m.name, "shared": "full text", "ms": t.elapsed().as_millis()});
+        if a.review {
+            d["review"] = true.into();
+        }
+        self.log(&vault, "recall", d);
         let from = m.provenance(m.updated().is_none().then(|| vault.last_changed(&m.name)).flatten());
         let from = if from.is_empty() { String::new() } else { format!(" · {from}") };
         self.reply(&vault, format!("recalled `{}`{from}", m.name), m.render())
@@ -396,6 +422,7 @@ impl HippoServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn list_memories(&self, Parameters(a): Parameters<ListArgs>) -> Result<CallToolResult, McpError> {
+        let t = std::time::Instant::now();
         let vault = self.vault()?;
         let list = vault.list().map_err(err)?;
         let lines: Vec<String> = list
@@ -404,7 +431,7 @@ impl HippoServer {
             .map(|m| format!("- {} [{}]{} {}", m.name, m.kind, if m.needs_review() { " (unconfirmed)" } else { "" }, m.description))
             .collect();
         let filter = a.kind.as_ref().map(|k| format!(" ({k})")).unwrap_or_default();
-        crate::log::record(&vault.root, "list", serde_json::json!({"count": lines.len(), "shared": "descriptions"}));
+        self.log(&vault, "list", serde_json::json!({"count": lines.len(), "shared": "descriptions", "ms": t.elapsed().as_millis()}));
         self.reply(&vault, format!("listed {} memories{filter}", lines.len()), lines.join("\n"))
     }
 
@@ -414,6 +441,7 @@ impl HippoServer {
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn search_memories(&self, Parameters(a): Parameters<SearchArgs>) -> Result<CallToolResult, McpError> {
+        let t = std::time::Instant::now();
         let vault = self.vault()?;
         let mut idx = Index::open(&vault.root).map_err(err)?;
         idx.refresh(&vault.memories_dir()).map_err(err)?;
@@ -427,12 +455,17 @@ impl HippoServer {
             .collect();
         let names: Vec<&str> = hits.iter().take(3).map(|h| h.name.as_str()).collect();
         let snippets = crate::config::GlobalConfig::load().is_ok_and(|g| g.search_snippets);
-        crate::log::record(&vault.root, "search", serde_json::json!({
-            "query": &a.query,
-            "hits": hits.len(),
-            "names": hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
-            "shared": if snippets { "descriptions + snippets" } else { "descriptions" },
-        }));
+        self.log(
+            &vault,
+            "search",
+            serde_json::json!({
+                "query": &a.query,
+                "hits": hits.len(),
+                "names": hits.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+                "shared": if snippets { "descriptions + snippets" } else { "descriptions" },
+                "ms": t.elapsed().as_millis(),
+            }),
+        );
         let receipt = match hits.len() {
             0 => format!("searched “{}” → no matches", a.query),
             n => format!("searched “{}” → {n} match(es): {}{}", a.query, names.join(", "), if n > 3 { ", …" } else { "" }),
@@ -461,6 +494,7 @@ impl HippoServer {
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
         let removed = self.read_visible(&vault, &a.name).is_ok() && vault.request_forget(&a.name, &agent).map_err(err)?;
         let receipt = if removed {
+            self.log(&vault, "forget", serde_json::json!({"name": a.name}));
             self.schedule_backup();
             format!("forgot `{}` · removed once you approve (`hippo review`) · {}", a.name, self.backup_note(&vault))
         } else {
@@ -486,7 +520,7 @@ impl HippoServer {
         if has_conflict_markers(&a.content) {
             return Err(McpError::invalid_params("content still contains conflict markers", None));
         }
-        reject_secrets(&a.content)?;
+        reject_secrets(&vault, &a.content)?;
         let path = vault.root.join(&a.path);
         crate::util::atomic_write(&path, a.content.as_bytes()).map_err(err)?;
         let remaining = vault.unresolved_conflicts().map_err(err)?;
@@ -538,6 +572,18 @@ impl HippoServer {
         Ok(vault.pending_changes().map_err(err)?.into_iter().partition(|p| p.visible_in(vault, &scope)))
     }
 
+    /// What a dialog asked and what the user answered (the funnel of the review).
+    fn log_dialog(&self, vault: &Vault, tool: &str, message: &str, asked: &Asked, since: std::time::Instant) {
+        let answer = match asked {
+            Asked::Pending(_) => return,
+            Asked::Yes => "yes",
+            Asked::No => "no",
+            Asked::Unavailable => "unavailable",
+        };
+        let summary: Vec<&str> = message.lines().skip(1).filter(|l| !l.starts_with("To see more")).collect();
+        self.log(vault, "dialog", serde_json::json!({"tool": tool, "summary": summary.join(" | "), "answer": answer, "ms": since.elapsed().as_millis()}));
+    }
+
     /// Memory names a change may touch: visible here (removals pending included, for review).
     fn reviewable(&self, m: &Memory) -> bool {
         m.visible_in(&self.scope.read().unwrap())
@@ -585,7 +631,7 @@ impl HippoServer {
                     Some("all") => drop(m.extra.remove("visibility")),
                     Some(v) => drop(m.extra.insert("visibility".into(), v.into())),
                 }
-                reject_secrets(&m.render())?;
+                reject_secrets(vault, &m.render())?;
                 Op::Write(m)
             }
             OpArg::Rename { from, to } => Op::Rename { from: seen(&from)?.name, to },
@@ -625,7 +671,10 @@ impl HippoServer {
             crate::change::tally(&lines)
         );
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
-        let receipt = match self.ask(&ctx, message, state, answers).await {
+        let (t, shown) = (std::time::Instant::now(), message.clone());
+        let asked = self.ask(&ctx, message, state, answers).await;
+        self.log_dialog(&vault, "propose_changes", &shown, &asked, t);
+        let receipt = match asked {
             Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
             Asked::Yes => {
                 vault.apply_changes(&changes, &agent, true).map_err(err)?;
@@ -736,7 +785,10 @@ impl HippoServer {
             message += &format!("\nUndo {} (back to what you last approved): {}", no.len(), crate::change::tally(&lines(&no)));
         }
         message += "\nTo see more first: decline and ask.";
-        let receipt = match self.ask(&ctx, message, state, answers).await {
+        let (t, shown) = (std::time::Instant::now(), message.clone());
+        let asked = self.ask(&ctx, message, state, answers).await;
+        self.log_dialog(&vault, "decide_changes", &shown, &asked, t);
+        let receipt = match asked {
             Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
             Asked::Yes => {
                 let mut failed = vec![];
@@ -818,6 +870,11 @@ impl ServerHandler for HippoServer {
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         if let Some(info) = context.peer.peer_info() {
             crate::safety::set_agent_name(&info.client_info.name);
+            if let Ok(vault) = self.vault() {
+                let dialogs = context.peer.supported_elicitation_modes().contains(&ElicitationMode::Form);
+                let (client, version) = (&info.client_info.name, &info.client_info.version);
+                self.log(&vault, "session", serde_json::json!({"client": client, "version": version, "protocol": info.protocol_version, "dialogs": dialogs}));
+            }
         }
 
     }

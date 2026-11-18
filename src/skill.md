@@ -29,9 +29,10 @@ anything new:
 
 ### 2. Tidy the memory
 
-1. `recall` `memory-policy` if it exists: how this user wants their memory organized. It wins over
+1. `recall` `memory-policy` (with `review: true`) if it exists: how this user wants their memory organized. It wins over
    the defaults below.
-2. `list_memories`, then `recall` only what you need to compare (each recall counts as a use).
+2. `list_memories`, then `recall` (with `review: true`, so these reads don't count as uses) only what
+   you need to compare.
 3. Look for:
    - **duplicates and overlaps** → merge into one memory
    - **memories mixing topics** → split
