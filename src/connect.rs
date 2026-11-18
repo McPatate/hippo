@@ -2,7 +2,8 @@
 //! - MCP server registered at **user** scope (every project), via the `claude` CLI;
 //! - a delimited memory-instructions block in `~/.claude/CLAUDE.md`;
 //! - a `SessionStart` hook that hands the agent its memory index (also after a compaction);
-//! - optionally the status line, wrapping any existing one (restored on disconnect).
+//! - optionally the status line, wrapping any existing one (restored on disconnect);
+//! - a `/hippo` user skill (`/hippo review`).
 //!
 //! Everything is reversible with `hippo disconnect claude`.
 
@@ -55,6 +56,7 @@ pub struct Report {
     pub statusline: String,
     pub file_access: String,
     pub session_start: String,
+    pub skill: String,
 }
 
 /// Is hippo registered as a user-scope MCP server?
@@ -203,6 +205,41 @@ fn disconnect_session_start() -> Result<String> {
         settings.as_object_mut().unwrap().remove("hooks");
     }
     save_settings(&settings)?;
+    Ok("removed".into())
+}
+
+const SKILL: &str = include_str!("skill.md");
+
+fn skill_path() -> PathBuf {
+    claude_dir().join("skills/hippo/SKILL.md")
+}
+
+/// A SKILL.md some hippo version wrote (not the user's own `hippo` skill).
+fn is_our_skill(text: &str) -> bool {
+    text.lines().any(|l| l == "name: hippo") && text.lines().any(|l| l == "argument-hint: review")
+}
+
+/// Install the `/hippo` user skill, never over someone else's.
+fn connect_skill() -> Result<String> {
+    let path = skill_path();
+    let what = match std::fs::read_to_string(&path) {
+        Ok(t) if t == SKILL => return Ok("already set".into()),
+        Ok(t) if is_our_skill(&t) => "updated",
+        _ if path.parent().is_some_and(|d| d.exists()) => return Ok("skipped: ~/.claude/skills/hippo exists and isn't hippo's".into()),
+        _ => "added",
+    };
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    crate::util::atomic_write(&path, SKILL.as_bytes())?;
+    Ok(format!("{what}: /hippo review"))
+}
+
+fn disconnect_skill() -> Result<String> {
+    let path = skill_path();
+    if !std::fs::read_to_string(&path).is_ok_and(|t| is_our_skill(&t)) {
+        return Ok("untouched".into());
+    }
+    std::fs::remove_file(&path)?;
+    let _ = std::fs::remove_dir(path.parent().unwrap()); // only if now empty
     Ok("removed".into())
 }
 
@@ -390,6 +427,7 @@ pub fn connect_claude(statusline: bool, pixel: bool) -> Result<Report> {
         statusline: if statusline { connect_statusline(pixel)? } else { "skipped".into() },
         file_access: connect_file_access()?,
         session_start: connect_session_start()?,
+        skill: connect_skill().unwrap_or_else(|e| format!("failed: {e:#}")),
     })
 }
 
@@ -400,6 +438,7 @@ pub fn disconnect_claude() -> Result<Report> {
         statusline: disconnect_statusline()?,
         file_access: disconnect_file_access()?,
         session_start: disconnect_session_start()?,
+        skill: disconnect_skill().unwrap_or_else(|e| format!("failed: {e:#}")),
     })
 }
 

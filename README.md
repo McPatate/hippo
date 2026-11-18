@@ -41,7 +41,7 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 | `hippo restore <user>/<bucket>` | new machine: rebuild from backup + key |
 | `hippo login [--device]` | sign in with Hugging Face (only if `hf auth login` isn't set up) |
 | `hippo key` | where your key is and how to keep it safe |
-| `hippo connect claude [--pixel]` · `hippo disconnect claude` | MCP + memory instructions + status line (wraps yours); fully reversible |
+| `hippo connect claude [--pixel]` · `hippo disconnect claude` | MCP + memory instructions + status line (wraps yours) + a `/hippo` skill: `/hippo review` goes through pending changes and tidies your memory with you, decided in Claude Code; fully reversible |
 | `hippo import claude-code [--dry-run]` | import Claude Code memories (re-runnable, read-only on the source) |
 | `hippo statusline [--wrap '<cmd>']` | `🦛 remembered prefers-rust 3s ago · ✓ backed up #12 · 73 memories` |
 | `hippo buddy [--name …] [--color …]` | meet your hippo (the `--pixel` status line) |

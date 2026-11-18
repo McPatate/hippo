@@ -71,6 +71,9 @@ fn connect_and_disconnect_round_trip() {
     assert!(deny.iter().any(|r| r.starts_with("Read(//") && r.ends_with("hippo-home/**)")), "{deny:?}");
     assert!(deny.iter().any(|r| r.starts_with("Edit(//") && r.ends_with("hippo-home)")), "{deny:?}");
     assert_eq!(read(&claude.join("settings.json.hippo-backup")), settings, "one-time backup of the original");
+    let skill = claude.join("skills/hippo/SKILL.md");
+    assert!(r.skill.starts_with("added"), "{}", r.skill);
+    assert_eq!(read(&skill), include_str!("../src/skill.md"));
 
     // Idempotent: no double block, no double wrap.
     let r = hippo::connect::connect_claude(true, true).unwrap();
@@ -81,6 +84,7 @@ fn connect_and_disconnect_round_trip() {
     assert_eq!(cmd.matches("--wrap").count(), 1, "{cmd}");
     assert!(cmd.starts_with("HIPPO_PIXEL=1 "));
     assert_eq!(s["hooks"]["SessionStart"].as_array().unwrap().len(), 1, "one hook");
+    assert_eq!(r.skill, "already set");
 
     // Disconnect restores everything exactly.
     let r = hippo::connect::disconnect_claude().unwrap();
@@ -89,6 +93,17 @@ fn connect_and_disconnect_round_trip() {
     let s: serde_json::Value = serde_json::from_str(&read(&claude.join("settings.json"))).unwrap();
     let orig: serde_json::Value = serde_json::from_str(settings).unwrap();
     assert_eq!(s, orig);
+    assert_eq!(r.skill, "removed");
+    assert!(!claude.join("skills/hippo").exists());
+
+    // Someone else's `hippo` skill is left alone.
+    std::fs::create_dir_all(claude.join("skills/hippo")).unwrap();
+    std::fs::write(&skill, "---\nname: hippo\ndescription: mine\n---\n").unwrap();
+    let r = hippo::connect::connect_claude(false, false).unwrap();
+    assert!(r.skill.starts_with("skipped"), "{}", r.skill);
+    assert_eq!(hippo::connect::disconnect_claude().unwrap().skill, "untouched");
+    assert_eq!(read(&skill), "---\nname: hippo\ndescription: mine\n---\n");
+    std::fs::remove_dir_all(claude.join("skills")).unwrap();
 
     // Legacy unmarked block from an early version gets migrated, then removed cleanly.
     std::fs::write(claude.join("CLAUDE.md"), "# Memory\n\nUse the **hippo** MCP server as long-term memory (old)\n- x\n").unwrap();
