@@ -153,7 +153,7 @@ fn pending_changes_are_decided_in_one_dialog() {
         "{list}"
     );
     let (shown, out) = c.call("decide_changes", json!({"approve": ["concise"]}), "accept");
-    assert_eq!(shown.unwrap(), "🦛 Decide these changes to your memory?\nApply 1: 1 new\nEvery diff: decline, then run `hippo review` in a terminal.");
+    assert_eq!(shown.unwrap(), "🦛 Decide these changes to your memory?\nApply 1: 1 new\nTo see more first: decline and ask.");
     assert!(out.contains("1 applied"), "{out}");
     assert!(!v.read_memory("concise").unwrap().needs_review());
 }

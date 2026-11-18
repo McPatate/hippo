@@ -701,7 +701,7 @@ impl HippoServer {
         if !no.is_empty() {
             message += &format!("\nUndo {} (back to what you last approved): {}", no.len(), crate::change::tally(&lines(&no)));
         }
-        message += "\nEvery diff: decline, then run `hippo review` in a terminal.";
+        message += "\nTo see more first: decline and ask.";
         let receipt = match self.ask(&ctx, message, state, answers).await {
             Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
             Asked::Yes => {
