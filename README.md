@@ -19,6 +19,7 @@ There are plenty of memory tools for AI agents. hippo is built around one promis
 - **Recover without hippo.** Backups are standard age-encrypted git bundles: `hf buckets cp` + `age -d` + `git fetch` rebuilds your vault ([format](docs/format.md)).
 - **Multi-device without silent data loss.** Devices merge through git. Conflicts are kept, never dropped, and reported to your agent so it can resolve them or ask you.
 - **You approve what agents remember.** Agent writes are drafts until you review the diff, and every memory says who wrote it and when. Ask your agent for 🧹 cleanup (the `cleanup` prompt) to merge duplicates and fix stale notes together.
+- **Works with Claude Code's own memory.** Each session starts with the memory index for its project (also after a compaction), and what Claude's auto memory writes is collected into hippo as drafts.
 - **Any agent, no lock-in.** Claude, ChatGPT, local models: agents are replaceable clients over MCP.
 - **One small binary** (plus `git`). No runtime, no dependency tree pulled at install time.
 
