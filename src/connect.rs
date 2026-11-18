@@ -20,7 +20,7 @@ Use the **hippo** MCP server as long-term memory (the user's own encrypted, port
 - Each session starts with an index of the memories for this project: `recall` what is relevant to the task, `search_memories` for anything else.
 - Save durable facts, preferences and feedback with `remember` (one topic per memory, short kebab-case names; update instead of duplicating).
 - Your own auto memory is collected into hippo at each session start (as drafts the user reviews), so other agents and machines get it too.
-- Memories are general guidance from past sessions and can be outdated; what the user says now wins. Your writes are drafts until the user approves them (`hippo review`).
+- Memories are general guidance from past sessions and can be outdated; what the user says now wins. Your writes are drafts until the user approves them (`/hippo review`, or `hippo review` in a terminal).
 - Never store secrets in memory.
 - After saving, updating or forgetting a memory, mention it in one short line (e.g. `🦛 remembered prefers-rust`).";
 /// What an early hippo version wrote to CLAUDE.md without markers.

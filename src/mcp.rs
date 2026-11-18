@@ -38,7 +38,9 @@ They return names and descriptions; `recall` only what you actually need.\n\
 (one fact or topic per memory, short kebab-case names, update an existing memory instead of duplicating).\n\
 - Memories are general guidance from past sessions: they can be outdated, and `unconfirmed` ones \
 were written by an agent and not yet reviewed by the user. What the user says now wins.\n\
-- Your writes are drafts until the user approves them with `hippo review`.\n\
+- Your writes are drafts until the user approves them (`/hippo review` in Claude Code, `hippo review` in a terminal). \
+To change several memories at once with the user's agreement (merge, rename, rescope, retire), use `propose_changes`: \
+hippo asks the user to confirm in a dialog.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
 - Facts that only matter in the current project: `remember` with `visibility: \"project\"`.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
@@ -767,11 +769,11 @@ impl HippoServer {
              or too narrow (`visibility`). Likely duplicates hippo spotted:\n{}\n\
              3. Propose a short plan, one line per change (merge / rewrite / rescope / forget) with why. \
              Ask me before changing anything: I may want a different organization.\n\
-             4. Apply what I agree to with `remember` (merged content under one name) and `forget` (the leftovers).\n\
-             5. Your changes are drafts: finish by telling me to run `hippo review` in a terminal to approve them{}.",
+             4. Apply what I agree to with one `propose_changes` call, one change per decision (a merge is a `write` \
+             plus a `remove` with `into` per absorbed memory). hippo asks me to confirm in a dialog{}.",
             visible.len(),
             if dupes.is_empty() { "- none".into() } else { dupes.join("\n") },
-            if pending > 0 { format!(" ({pending} already waiting)") } else { String::new() },
+            if pending > 0 { format!("; {pending} older change(s) are waiting too: `pending_changes`, then `decide_changes`") } else { String::new() },
         );
         Ok(vec![PromptMessage::new_text(Role::User, text)])
     }
