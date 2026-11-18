@@ -39,6 +39,23 @@ pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
     out
 }
 
+/// Has the index for this project changed since the last session start? Remembers it locally
+/// (`.hippo/context.json`), written only on a change.
+pub fn changed(vault: &crate::vault::Vault, scope: &Scope, names: &[&str]) -> bool {
+    use sha2::Digest;
+    let path = vault.meta_dir().join("context.json");
+    let mut seen: std::collections::BTreeMap<String, String> =
+        std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+    let key = scope.keys.first().cloned().unwrap_or_else(|| scope.dir.display().to_string());
+    let hash = hex::encode(&sha2::Sha256::digest(names.join("\n").as_bytes())[..8]);
+    if seen.get(&key) == Some(&hash) {
+        return false;
+    }
+    seen.insert(key, hash);
+    let _ = std::fs::write(&path, serde_json::to_string(&seen).unwrap_or_default());
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

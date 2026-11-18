@@ -728,26 +728,40 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             if !std::io::stdin().is_terminal() {
                 let _ = std::io::stdin().read_to_end(&mut input);
             }
-            let cwd = serde_json::from_slice::<Value>(&input)
-                .ok()
-                .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let t = std::time::Instant::now();
+            let hook = serde_json::from_slice::<Value>(&input).unwrap_or_default();
+            let cwd = hook["cwd"].as_str().map(PathBuf::from).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let Ok(v) = vault_path(cli).and_then(|p| Vault::open(&p)) else { return Ok(()) };
+            let fail = |what: &str, e: anyhow::Error| {
+                eprintln!("hippo: could not {what}: {e:#}");
+                hippo::log::record(&v.root, "error", json!({"in": "context", "what": what, "error": format!("{e:#}")}));
+            };
             let from = hippo::import::default_claude_dir();
             if *claude && from.is_dir() {
                 use hippo::import::{Status, count};
                 match hippo::import::plan_and_import_claude(&v, &from, false, Some("claude-code")) {
                     Ok((plans, Some(_))) => hippo::log::record(&v.root, "import", json!({"source": "claude-code", "new": count(&plans, Status::New), "updated": count(&plans, Status::Updated), "secret": count(&plans, Status::Secret)})),
                     Ok(_) => {}
-                    Err(e) => eprintln!("hippo: could not collect Claude Code's memories: {e:#}"),
+                    Err(e) => fail("collect Claude Code's memories", e),
                 }
                 if let Err(e) = hippo::import::write_back_claude(&v, &from) {
-                    eprintln!("hippo: could not update Claude Code's memories: {e:#}");
+                    fail("update Claude Code's memories", e);
                 }
             }
             let scope = hippo::project::Scope::here(&v, &cwd);
             let idx = hippo::context::index(&v.list().unwrap_or_default(), &scope, hippo::context::BUDGET);
-            hippo::log::record(&v.root, "context", json!({"count": idx.lines().count().saturating_sub(1), "shared": "descriptions"}));
+            let names: Vec<&str> = idx.lines().filter_map(|l| l.strip_prefix("- ")).filter(|l| !l.starts_with('…')).filter_map(|l| l.split(' ').next()).collect();
+            let total: usize = idx.split_whitespace().nth(2).and_then(|n| n.parse().ok()).unwrap_or(0);
+            let mut d = json!({
+                "count": names.len(), "cut": total.saturating_sub(names.len()), "shared": "descriptions",
+                "source": hook["source"], "session": hook["session_id"].as_str().map(|s| &s[..s.len().min(8)]),
+                "project": scope.keys.first(), "ms": t.elapsed().as_millis(),
+            });
+            // The names only when the list changed, so a session start stays one short line.
+            if hippo::context::changed(&v, &scope, &names) {
+                d["names"] = json!(names);
+            }
+            hippo::log::record(&v.root, "context", d);
             print!("{idx}");
             Ok(())
         }
@@ -1017,6 +1031,12 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                     prompt(&format!("Apply all {n} change{s}?"), "y/N")?.eq_ignore_ascii_case("y").then_some(true)
                 }
             };
+            let answer = match choice {
+                Some(true) => "apply",
+                Some(false) => "undo",
+                None => "later",
+            };
+            hippo::log::record(&v.root, "review", json!({"changes": n, "answer": answer, "pager": paged.is_some()}));
             let (verb, failed): (&str, Vec<String>) = match choice {
                 None => {
                     out.say(dim("left for later"));
