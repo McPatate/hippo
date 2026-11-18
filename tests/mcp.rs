@@ -18,6 +18,7 @@ impl Client {
         let mut child = Command::new(env!("CARGO_BIN_EXE_hippo"))
             .current_dir(home)
             .env("HIPPO_HOME", home)
+            .env("CLAUDE_CODE_SESSION_ID", "5e55101d-0000-0000-0000-000000000000")
             .arg("--vault")
             .arg(&vault.root)
             .arg("mcp")

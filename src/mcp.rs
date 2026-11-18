@@ -57,7 +57,7 @@ pub struct HippoServer {
     /// The agent's project (stdio servers start in its folder): scope for `project:` memories.
     /// (MCP roots would be the protocol answer, but they are deprecated by SEP-2577.)
     scope: Arc<std::sync::RwLock<Scope>>,
-    /// This server's run, one per agent session: links what one session read in the log.
+    /// The agent session this server runs for (Claude Code's id when it gives one, as the context hook logs it).
     session: String,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -226,7 +226,7 @@ impl HippoServer {
             backup_running: Arc::default(),
             backup_again: Arc::default(),
             scope: Arc::new(std::sync::RwLock::new(scope)),
-            session: crate::util::random_hex(4),
+            session: std::env::var("CLAUDE_CODE_SESSION_ID").ok().and_then(|s| s.get(..8).map(String::from)).unwrap_or_else(|| crate::util::random_hex(4)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
         }
