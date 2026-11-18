@@ -173,3 +173,21 @@ fn changes_in_other_projects_are_approved_by_count_only() {
     assert!(out.contains("1 applied"), "{out}");
     assert!(!v.read_memory("elsewhere-only").unwrap().needs_review());
 }
+
+#[test]
+fn project_writes_say_where_they_are_seen_and_refuse_unknown_projects() {
+    let (tmp, v) = setup();
+    let mut c = Client::start(&v, tmp.path(), false);
+    let note = |name: &str, vis: &str| json!({"name": name, "content": "Engine notes.", "visibility": vis});
+    let (_, out) = c.call("remember", note("here-notes", "project"), "accept");
+    let here = hippo::project::Registry::load(&v.root).unwrap().projects.into_keys().next().unwrap();
+    assert!(out.contains(&format!("only in project {here}")), "{out}");
+
+    let (_, out) = c.call("remember", note("engine-notes", "project:safetensors"), "accept");
+    assert!(out.contains(&format!("no project `safetensors` (this folder is `{here}`); known: {here}")), "{out}");
+    assert!(v.read_memory("engine-notes").is_err());
+
+    let log = std::fs::read_to_string(v.root.join(".hippo/log.jsonl")).unwrap();
+    let line = log.lines().find(|l| l.contains("\"remember\"")).unwrap();
+    assert!(line.contains("\"session\":\"5e55101d\"") && line.contains(&format!("\"visibility\":\"project:{here}\"")), "{line}");
+}

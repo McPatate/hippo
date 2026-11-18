@@ -42,7 +42,8 @@ were written by an agent and not yet reviewed by the user. What the user says no
 To change several memories at once with the user's agreement (merge, rename, rescope, retire), use `propose_changes`: \
 hippo asks the user to confirm in a dialog.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
-- Facts that only matter in the current project: `remember` with `visibility: \"project\"`.\n\
+- Facts that only matter in one project: `remember` with `visibility: \"project\"` (the folder this session started in) \
+or `\"project:<key>\"` when they belong to another project than that folder.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
 - If a response starts with `⚠️ MEMORY MERGE CONFLICT`, resolve it with `resolve_conflict` before \
 continuing: keep information from both sides when they are compatible; if they genuinely disagree, \
@@ -77,7 +78,7 @@ pub struct RememberArgs {
     #[serde(rename = "type")]
     pub kind: Option<String>,
     pub tags: Option<Vec<String>>,
-    /// `all` (default), `private` (never returned to agents), `project` (only in this project), or `project:<key>`.
+    /// `all` (default), `private` (never returned to agents), `project` (only in the project this session started in), or `project:<key>` (another project).
     pub visibility: Option<String>,
 }
 
@@ -254,11 +255,15 @@ impl HippoServer {
     }
 
     /// The key for a project-scoped write. `None` means this project: its key, created from the
-    /// folder name the first time. A key nobody uses yet is linked to this folder.
+    /// folder name the first time. A key nobody uses yet names this folder, if it has no key yet.
     fn project_key(&self, vault: &Vault, key: Option<&str>) -> anyhow::Result<String> {
         let mut scope = self.scope.write().unwrap();
         if key.is_none() && !scope.keys.is_empty() {
             return Ok(scope.keys[0].clone());
+        }
+        if let Some(k) = key.map(crate::memory::slugify).filter(|_| !scope.keys.is_empty()) {
+            let known: Vec<String> = crate::project::Registry::load(&vault.root)?.projects.into_keys().collect();
+            anyhow::ensure!(known.contains(&k), "no project `{k}` (this folder is `{}`); known: {}", scope.keys[0], known.join(", "));
         }
         let id = crate::project::Ident::of(&scope.dir);
         let (key, here) = vault.update_registry("projects: link a folder", |reg| match key {
@@ -385,11 +390,17 @@ impl HippoServer {
         let name = crate::memory::slugify(&m.name);
         let receipt = match &commit {
             Some(c) => {
-                self.log(&vault, "remember", serde_json::json!({"name": name, "new": !updated}));
+                let only = m.extra.get("visibility").cloned();
+                self.log(&vault, "remember", serde_json::json!({"name": name, "new": !updated, "visibility": only}));
                 self.schedule_backup();
                 let what = if m.description.is_empty() { String::new() } else { format!(" — {}", m.description) };
+                let seen = match only.as_deref().and_then(|v| v.strip_prefix("project:")) {
+                    Some(k) => format!(" · only in project {k}"),
+                    None if only.is_some() => " · private".into(),
+                    None => String::new(),
+                };
                 format!(
-                    "{} `{name}` [{}]{what} · draft until you approve (`hippo review`) · {} · {}",
+                    "{} `{name}` [{}]{what}{seen} · draft until you approve (`hippo review`) · {} · {}",
                     if updated { "updated" } else { "remembered" },
                     m.kind,
                     &c[..8],
