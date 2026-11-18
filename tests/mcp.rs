@@ -157,3 +157,18 @@ fn pending_changes_are_decided_in_one_dialog() {
     assert!(out.contains("1 applied"), "{out}");
     assert!(!v.read_memory("concise").unwrap().needs_review());
 }
+
+#[test]
+fn changes_in_other_projects_are_approved_by_count_only() {
+    let (tmp, v) = setup();
+    let mut m = Memory { name: "elsewhere-only".into(), kind: "project".into(), body: "Secret plan.".into(), ..Default::default() };
+    m.extra.insert("visibility".into(), "project:other".into());
+    v.remember_by(&m, Some("claude-code")).unwrap();
+    let mut c = Client::start(&v, tmp.path(), true);
+    let (_, list) = c.call("pending_changes", json!({}), "accept");
+    assert!(list.contains("1 more in other projects") && !list.contains("Secret plan"), "{list}");
+    let (shown, out) = c.call("decide_changes", json!({"elsewhere": true}), "accept");
+    assert_eq!(shown.unwrap(), "🦛 Decide these changes to your memory?\nApply 1 in other projects: other 1 (1 new)\nTo see more first: decline and ask.");
+    assert!(out.contains("1 applied"), "{out}");
+    assert!(!v.read_memory("elsewhere-only").unwrap().needs_review());
+}

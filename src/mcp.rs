@@ -154,6 +154,10 @@ pub struct DecideArgs {
     /// Handles of the changes the user rejected (each memory goes back to its last approved version).
     #[serde(default)]
     pub reject: Vec<String>,
+    /// Also approve every change pending in other projects, which you can't see: the user confirms
+    /// them by count per project in the dialog. Only when the user asked for it.
+    #[serde(default)]
+    pub elsewhere: bool,
 }
 
 /// What the user answered in a dialog hippo showed them.
@@ -528,6 +532,12 @@ impl HippoServer {
         }
     }
 
+    /// Pending changes reviewable here, and the rest (other projects: only counted, never shown).
+    fn split_pending(&self, vault: &Vault) -> Result<(Vec<crate::change::Pending>, Vec<crate::change::Pending>), McpError> {
+        let scope = self.scope.read().unwrap().clone();
+        Ok(vault.pending_changes().map_err(err)?.into_iter().partition(|p| p.visible_in(vault, &scope)))
+    }
+
     /// Memory names a change may touch: visible here (removals pending included, for review).
     fn reviewable(&self, m: &Memory) -> bool {
         m.visible_in(&self.scope.read().unwrap())
@@ -643,7 +653,7 @@ impl HippoServer {
     )]
     async fn pending_changes(&self) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
-        let pending: Vec<_> = vault.pending_changes().map_err(err)?.into_iter().filter(|p| p.members.iter().all(|m| self.reviewable(m))).collect();
+        let (pending, elsewhere) = self.split_pending(&vault)?;
         let mut body = vec![];
         for p in &pending {
             let mut t = format!("## {} · handle `{}` · by {}\n", p.meta.title, handle(p), p.meta.by);
@@ -666,7 +676,13 @@ impl HippoServer {
             }
             body.push(t);
         }
-        let receipt = format!("{} change(s) waiting for the user", pending.len());
+        let mut receipt = format!("{} change(s) waiting for the user", pending.len());
+        if !elsewhere.is_empty() {
+            receipt += &format!(
+                "; {} more in other projects (not shown here): `decide_changes` with `elsewhere: true` approves them once the user confirms the counts",
+                elsewhere.len()
+            );
+        }
         self.reply(&vault, receipt, body.join("\n"))
     }
 
@@ -684,19 +700,37 @@ impl HippoServer {
         ctx: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let vault = self.vault()?;
-        let pending: Vec<_> = vault.pending_changes().map_err(err)?.into_iter().filter(|p| p.members.iter().all(|m| self.reviewable(m))).collect();
+        let (pending, elsewhere) = self.split_pending(&vault)?;
         let find = |h: &String| {
             pending.iter().find(|p| &handle(p) == h).ok_or_else(|| McpError::invalid_params(format!("no pending change `{h}` (call `pending_changes`)"), None))
         };
-        let yes = a.approve.iter().map(find).collect::<Result<Vec<_>, _>>()?;
+        let mut yes = a.approve.iter().map(find).collect::<Result<Vec<_>, _>>()?;
         let no = a.reject.iter().map(find).collect::<Result<Vec<_>, _>>()?;
+        let others: Vec<&crate::change::Pending> = if a.elsewhere { elsewhere.iter().collect() } else { vec![] };
+        let lines = |list: &[&crate::change::Pending]| -> Vec<String> { list.iter().flat_map(|p| crate::change::describe(&vault, &p.ops(), true)).collect() };
+        let mut places = std::collections::BTreeMap::<String, usize>::new();
+        for p in &others {
+            for k in p.places() {
+                *places.entry(k).or_default() += 1;
+            }
+        }
+        let others_line = format!(
+            "\nApply {} in other projects: {} ({})",
+            others.len(),
+            places.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · "),
+            crate::change::tally(&lines(&others))
+        );
+        yes.extend(others.iter().copied());
         if yes.is_empty() && no.is_empty() {
             return Err(McpError::invalid_params("nothing to decide", None));
         }
-        let lines = |list: &[&crate::change::Pending]| -> Vec<String> { list.iter().flat_map(|p| crate::change::describe(&vault, &p.ops(), true)).collect() };
         let mut message = "🦛 Decide these changes to your memory?".to_string();
-        if !yes.is_empty() {
-            message += &format!("\nApply {}: {}", yes.len(), crate::change::tally(&lines(&yes)));
+        let here = &yes[..yes.len() - others.len()];
+        if !here.is_empty() {
+            message += &format!("\nApply {}: {}", here.len(), crate::change::tally(&lines(here)));
+        }
+        if !others.is_empty() {
+            message += &others_line;
         }
         if !no.is_empty() {
             message += &format!("\nUndo {} (back to what you last approved): {}", no.len(), crate::change::tally(&lines(&no)));
