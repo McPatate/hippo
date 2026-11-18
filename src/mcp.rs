@@ -14,10 +14,16 @@ use crate::project::Scope;
 use crate::remote::Remote;
 use crate::vault::{Vault, has_conflict_markers};
 use rmcp::{
-    ErrorData as McpError, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    handler::server::{
+        router::tool::ToolRouter,
+        tool::{InputResponses, RequestState},
+        wrapper::Parameters,
+    },
     model::*,
-    prompt, prompt_handler, prompt_router, schemars, tool, tool_handler, tool_router,
+    prompt, prompt_handler, prompt_router, schemars,
+    service::{ElicitationMode, RequestContext},
+    tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -97,6 +103,74 @@ pub struct ResolveArgs {
     pub path: String,
     /// The full resolved file content, without any conflict markers.
     pub content: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ProposeArgs {
+    /// Every change the user agreed to. hippo shows them all in one dialog.
+    pub changes: Vec<ChangeArg>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ChangeArg {
+    /// Short label, e.g. "merge PR conventions into pr-style".
+    pub title: String,
+    /// Why, in one line.
+    pub why: Option<String>,
+    /// What it does; all or nothing.
+    pub ops: Vec<OpArg>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "op", rename_all = "lowercase")]
+pub enum OpArg {
+    /// Create or update a memory (its full new content).
+    Write {
+        name: String,
+        content: String,
+        description: Option<String>,
+        /// user, feedback, project, reference or note (default: unchanged, or note).
+        #[serde(rename = "type")]
+        kind: Option<String>,
+        tags: Option<Vec<String>>,
+        /// `all`, `private`, `project` (this one) or `project:<key>`.
+        visibility: Option<String>,
+    },
+    /// The same memory under a new name.
+    Rename { from: String, to: String },
+    /// Change who sees it: `all`, `private`, `project` (this one) or `project:<key>` (an existing project).
+    Scope { name: String, visibility: String },
+    /// Delete it. `into`: the memory that now holds its content (a merge).
+    Remove { name: String, into: Option<String> },
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DecideArgs {
+    /// Handles (from `pending_changes`) of the changes the user approved.
+    #[serde(default)]
+    pub approve: Vec<String>,
+    /// Handles of the changes the user rejected (each memory goes back to its last approved version).
+    #[serde(default)]
+    pub reject: Vec<String>,
+}
+
+/// What the user answered in a dialog hippo showed them.
+enum Asked {
+    Yes,
+    No,
+    /// The client can't show hippo's dialogs.
+    Unavailable,
+    /// Protocol 2026-07-28+: the client shows the dialog and calls the tool again with the answer.
+    Pending(InputRequiredResult),
+}
+
+/// A dialog with no fields: the user's Accept or Decline is the answer.
+fn dialog(message: String) -> ElicitRequestParams {
+    ElicitRequestParams::FormElicitationParams { meta: None, message, requested_schema: ElicitationSchema::builder().build_unchecked() }
+}
+
+fn handle(p: &crate::change::Pending) -> String {
+    p.id.clone().unwrap_or_else(|| p.members.iter().map(|m| m.name.as_str()).collect::<Vec<_>>().join("+"))
 }
 
 /// Agents never get to store secrets: memories are sent to model providers.
@@ -275,7 +349,9 @@ impl HippoServer {
                 let key = self.project_key(&vault, v.strip_prefix("project:").map(str::trim)).map_err(err)?;
                 m.extra.insert("visibility".into(), format!("project:{key}"));
             }
-            Some(v) => return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project (this one) or project:<key>"), None)),
+            Some(v) => {
+                return Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project (this one) or project:<key>"), None));
+            }
         }
         reject_secrets(&m.render())?;
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
@@ -416,6 +492,246 @@ impl HippoServer {
             format!("resolved `{}` · still conflicted: {}", a.path, remaining.join(", "))
         };
         self.reply(&vault, receipt, String::new())
+    }
+
+    /// Ask the user in a dialog hippo writes itself; the answer comes back to hippo, never
+    /// through the model. `key` binds the answer to exactly what was shown.
+    async fn ask(&self, ctx: &RequestContext<RoleServer>, message: String, state: Option<String>, answers: Option<rmcp::model::InputResponses>) -> Asked {
+        use sha2::Digest;
+        let key = hex::encode(sha2::Sha256::digest(message.as_bytes()));
+        let new_protocol = ctx.protocol_version().is_some_and(|v| v >= ProtocolVersion::V_2026_07_28);
+        if new_protocol {
+            if state.as_deref() == Some(key.as_str())
+                && let Some(answer) = answers.and_then(|mut a| a.remove("confirm"))
+            {
+                let r: Option<ElicitResult> = serde_json::from_value(answer).ok();
+                return if r.is_some_and(|r| matches!(r.action, ElicitationAction::Accept)) { Asked::Yes } else { Asked::No };
+            }
+            if ctx.client_capabilities().is_none_or(|c| c.elicitation.is_none()) {
+                return Asked::Unavailable;
+            }
+            let req = InputRequests::from([("confirm".to_string(), InputRequest::Elicitation(ElicitRequest::new(dialog(message))))]);
+            return Asked::Pending(InputRequiredResult::new(Some(req), Some(key)));
+        }
+        if !ctx.peer.supported_elicitation_modes().contains(&ElicitationMode::Form) {
+            return Asked::Unavailable;
+        }
+        match ctx.peer.create_elicitation(dialog(message)).await {
+            Ok(r) if matches!(r.action, ElicitationAction::Accept) => Asked::Yes,
+            Ok(_) => Asked::No,
+            Err(e) => {
+                eprintln!("hippo: dialog failed: {e}");
+                Asked::Unavailable
+            }
+        }
+    }
+
+    /// Memory names a change may touch: visible here (removals pending included, for review).
+    fn reviewable(&self, m: &Memory) -> bool {
+        m.visible_in(&self.scope.read().unwrap())
+    }
+
+    fn to_op(&self, vault: &Vault, op: OpArg) -> Result<crate::change::Op, McpError> {
+        use crate::change::Op;
+        let visibility = |v: &str| -> Result<String, McpError> {
+            match v.trim() {
+                "all" | "private" => Ok(v.trim().into()),
+                "project" => Ok(format!("project:{}", self.project_key(vault, None).map_err(err)?)),
+                p if p.starts_with("project:") => {
+                    let k = crate::memory::slugify(&p[8..]);
+                    let known = crate::project::Registry::load(&vault.root).map_err(err)?.projects.contains_key(&k);
+                    if known {
+                        Ok(format!("project:{k}"))
+                    } else {
+                        Err(McpError::invalid_params(format!("no project `{k}`: the user links it with `hippo project link {k} <dir>`"), None))
+                    }
+                }
+                v => Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project or project:<key>"), None)),
+            }
+        };
+        let seen = |n: &str| -> Result<Memory, McpError> { self.read_visible(vault, n) };
+        Ok(match op {
+            OpArg::Write { name, content, description, kind, tags, visibility: vis } => {
+                let existing = vault.read_memory(&name).ok();
+                if existing.as_ref().is_some_and(|m| !self.reviewable(m)) {
+                    return Err(McpError::invalid_params(format!("the name `{name}` is taken outside this project; pick another"), None));
+                }
+                let kind = kind.or(existing.as_ref().map(|e| e.kind.clone())).unwrap_or_else(|| "note".into());
+                if !KINDS.contains(&kind.as_str()) {
+                    return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
+                }
+                let mut m = Memory {
+                    name,
+                    description: description.or(existing.as_ref().map(|e| e.description.clone())).unwrap_or_default(),
+                    kind,
+                    tags: tags.or(existing.as_ref().map(|e| e.tags.clone())).unwrap_or_default(),
+                    extra: existing.map(|e| e.extra).unwrap_or_default(),
+                    body: content,
+                };
+                match vis.as_deref().map(visibility).transpose()?.as_deref() {
+                    None => {}
+                    Some("all") => drop(m.extra.remove("visibility")),
+                    Some(v) => drop(m.extra.insert("visibility".into(), v.into())),
+                }
+                reject_secrets(&m.render())?;
+                Op::Write(m)
+            }
+            OpArg::Rename { from, to } => Op::Rename { from: seen(&from)?.name, to },
+            OpArg::Scope { name, visibility: v } => Op::Scope { name: seen(&name)?.name, visibility: visibility(&v)? },
+            OpArg::Remove { name, into } => Op::Remove { name: seen(&name)?.name, into },
+        })
+    }
+
+    #[tool(
+        title = "🦛 Propose changes",
+        description = "Apply changes to the memory that the user agreed to (merge, split, rename, rescope, edit, remove), \
+                       grouped as one change per decision. hippo shows the user one dialog listing them all and applies \
+                       them only if they say yes. If they decline, nothing changed: ask what they want instead.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn propose_changes(
+        &self,
+        Parameters(a): Parameters<ProposeArgs>,
+        RequestState(state): RequestState,
+        InputResponses(answers): InputResponses,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let vault = self.vault()?;
+        let mut changes = vec![];
+        for c in a.changes {
+            let ops = c.ops.into_iter().map(|o| self.to_op(&vault, o)).collect::<Result<Vec<_>, _>>()?;
+            changes.push(crate::change::Change { title: c.title, why: c.why.unwrap_or_default(), ops });
+        }
+        if changes.is_empty() {
+            return Err(McpError::invalid_params("no changes", None));
+        }
+        let mut message = format!("🦛 Apply {} change{} to your memory?\n", changes.len(), if changes.len() == 1 { "" } else { "s" });
+        for c in &changes {
+            message += &format!("\n{}\n", c.title);
+            for l in crate::change::describe(&vault, &c.ops, false) {
+                message += &format!("  {l}\n");
+            }
+        }
+        message += "\nDeleted memories stay in history.";
+        let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
+        let receipt = match self.ask(&ctx, message, state, answers).await {
+            Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
+            Asked::Yes => {
+                vault.apply_changes(&changes, &agent, true).map_err(err)?;
+                format!("applied {} change(s): the user approved them in hippo's dialog", changes.len())
+            }
+            Asked::No => "the user declined in hippo's dialog: nothing was applied. Ask what they want to change.".into(),
+            Asked::Unavailable => {
+                vault.apply_changes(&changes, &agent, false).map_err(err)?;
+                format!(
+                    "saved {} change(s) as drafts: this client can't show hippo's dialog, so the user approves them with `hippo review` in a terminal",
+                    changes.len()
+                )
+            }
+        };
+        self.schedule_backup();
+        Ok(CallToolResponse::Complete(self.reply(&vault, receipt, String::new())?))
+    }
+
+    #[tool(
+        title = "🦛 Pending changes",
+        description = "Changes to the memory waiting for the user's decision (agent drafts, removals, renames), grouped: \
+                       hippo's description of each, and the content involved (also of memories to be deleted), so you \
+                       can go through them with the user. Then `decide_changes`.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn pending_changes(&self) -> Result<CallToolResult, McpError> {
+        let vault = self.vault()?;
+        let pending: Vec<_> = vault.pending_changes().map_err(err)?.into_iter().filter(|p| p.members.iter().all(|m| self.reviewable(m))).collect();
+        let mut body = vec![];
+        for p in &pending {
+            let mut t = format!("## {} · handle `{}` · by {}\n", p.meta.title, handle(p), p.meta.by);
+            if !p.meta.why.is_empty() {
+                t += &format!("why: {}\n", p.meta.why);
+            }
+            for l in crate::change::describe(&vault, &p.ops(), true) {
+                t += &format!("- {l}\n");
+            }
+            for m in &p.members {
+                let before = vault.approved_version(&m.name).map_err(err)?.map(|t| Memory::parse(&m.name, &t));
+                match (m.status(), before) {
+                    (Some("forget"), _) => t += &format!("\n### {} (to be deleted)\n{}\n", m.name, m.body.trim()),
+                    (_, Some(b)) if b.body.trim() != m.body.trim() => {
+                        t += &format!("\n### {} before\n{}\n\n### {} after\n{}\n", m.name, b.body.trim(), m.name, m.body.trim())
+                    }
+                    (_, Some(_)) => {}
+                    (_, None) => t += &format!("\n### {} (new)\n{}\n", m.name, m.body.trim()),
+                }
+            }
+            body.push(t);
+        }
+        let receipt = format!("{} change(s) waiting for the user", pending.len());
+        self.reply(&vault, receipt, body.join("\n"))
+    }
+
+    #[tool(
+        title = "🦛 Decide changes",
+        description = "Approve and reject pending changes the user decided on (handles from `pending_changes`). hippo \
+                       shows the user one dialog to confirm; nothing happens if they decline.",
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn decide_changes(
+        &self,
+        Parameters(a): Parameters<DecideArgs>,
+        RequestState(state): RequestState,
+        InputResponses(answers): InputResponses,
+        ctx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let vault = self.vault()?;
+        let pending: Vec<_> = vault.pending_changes().map_err(err)?.into_iter().filter(|p| p.members.iter().all(|m| self.reviewable(m))).collect();
+        let find = |h: &String| {
+            pending.iter().find(|p| &handle(p) == h).ok_or_else(|| McpError::invalid_params(format!("no pending change `{h}` (call `pending_changes`)"), None))
+        };
+        let yes = a.approve.iter().map(find).collect::<Result<Vec<_>, _>>()?;
+        let no = a.reject.iter().map(find).collect::<Result<Vec<_>, _>>()?;
+        if yes.is_empty() && no.is_empty() {
+            return Err(McpError::invalid_params("nothing to decide", None));
+        }
+        let mut message = "🦛 Decide these changes to your memory?\n".to_string();
+        for (label, list) in [("Apply", &yes), ("Undo (back to the last version you approved)", &no)] {
+            if !list.is_empty() {
+                message += &format!("\n{label}:\n");
+                for p in list {
+                    message += &format!("  {}\n", p.meta.title);
+                    for l in crate::change::describe(&vault, &p.ops(), true) {
+                        message += &format!("    {l}\n");
+                    }
+                }
+            }
+        }
+        if yes.iter().any(|p| p.members.iter().any(|m| m.status() == Some("forget"))) {
+            message += "\nDeleted memories stay in history.";
+        }
+        let receipt = match self.ask(&ctx, message, state, answers).await {
+            Asked::Pending(r) => return Ok(CallToolResponse::InputRequired(r)),
+            Asked::Yes => {
+                let mut failed = vec![];
+                for p in &yes {
+                    if let Err(e) = vault.approve_change(p) {
+                        failed.push(format!("{}: {e:#}", p.meta.title));
+                    }
+                }
+                for p in &no {
+                    if let Err(e) = vault.reject_change(p) {
+                        failed.push(format!("{}: {e:#}", p.meta.title));
+                    }
+                }
+                let _ = crate::import::write_back_claude(&vault, &crate::import::default_claude_dir());
+                match failed.is_empty() {
+                    true => format!("done: {} applied, {} undone (the user confirmed in hippo's dialog)", yes.len(), no.len()),
+                    false => format!("partly done; not applied: {}", failed.join("; ")),
+                }
+            }
+            Asked::No => "the user declined in hippo's dialog: nothing changed. Ask what they want instead.".into(),
+            Asked::Unavailable => "this client can't show hippo's dialog: the user decides with `hippo review` in a terminal".into(),
+        };
+        self.schedule_backup();
+        Ok(CallToolResponse::Complete(self.reply(&vault, receipt, String::new())?))
     }
 
     #[tool(
