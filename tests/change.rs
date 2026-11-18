@@ -103,3 +103,15 @@ fn drafts_from_before_changes_show_renames_as_renames() {
     v.approve_change(&pending[0]).unwrap();
     assert!(v.read_memory("feedback-concise").is_err() && !v.read_memory("concise").unwrap().needs_review());
 }
+
+#[test]
+fn a_pending_change_reads_as_a_git_diff() {
+    let (_t, v) = vault();
+    let scope = Change { title: "scope".into(), why: String::new(), ops: vec![Op::Scope { name: "pr-style".into(), visibility: "private".into() }] };
+    v.apply_changes(&[rename(), scope], "claude-code", false).unwrap();
+    let pending = v.pending_changes().unwrap();
+    let diff = |t: &str| v.diff_change(pending.iter().find(|p| p.meta.title == t).unwrap(), false).unwrap();
+    let r = diff("drop the prefix");
+    assert!(r.contains("rename from a/memories/feedback-concise.md") && r.contains("rename to b/memories/concise.md"), "{r}");
+    assert!(diff("scope").contains("+visibility: private"));
+}

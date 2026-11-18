@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hippo::backup::{self, RestoreOptions};
-use hippo::change::{Op, Pending, describe};
+use hippo::change::Pending;
 use hippo::config::{self, GlobalConfig, RemoteConfig};
 use hippo::crypto::Key;
 use hippo::index::Index;
@@ -248,6 +248,11 @@ impl Out {
         self.sees_all() || m.visible_in(self.scope.get_or_init(|| hippo::project::Scope::here(v, &std::env::current_dir().unwrap_or_default())))
     }
 
+    /// A pending change this caller may review: its memories seen here before or after it.
+    fn sees_change(&self, v: &Vault, p: &Pending) -> bool {
+        self.sees_all() || p.visible_in(v, self.scope.get_or_init(|| hippo::project::Scope::here(v, &std::env::current_dir().unwrap_or_default())))
+    }
+
     /// Who is writing: `None` for the user, else the agent (its changes wait for review).
     fn writer(&self) -> Option<String> {
         (!self.sees_all()).then(|| hippo::safety::agent_name().unwrap_or_else(|| "agent".into()))
@@ -378,89 +383,6 @@ fn read_body(agent: bool, message: Option<String>, existing: Option<&str>) -> Re
         bail!("editor exited with an error; nothing saved");
     }
     Ok(body)
-}
-
-/// A memory's diff against the last approved version, without git's header.
-fn diff_lines(v: &Vault, m: &Memory) -> Result<Vec<String>> {
-    let (base, now) = (v.meta_dir().join("review-base.md"), v.meta_dir().join("review-now.md"));
-    let approved = v.approved_version(&m.name)?.map(|t| Memory::parse(&m.name, &t).content().render());
-    std::fs::write(&base, approved.unwrap_or_default())?;
-    std::fs::write(&now, m.content().render())?;
-    let color = if ui::color() { "--color=always" } else { "--color=never" };
-    let d = v.git.try_run(["diff", "--no-index", "--unified=1", color,&base.to_string_lossy(), &now.to_string_lossy()])?;
-    let _ = (std::fs::remove_file(&base), std::fs::remove_file(&now));
-    Ok(d.stdout.lines().skip_while(|l| !l.contains("@@")).map(String::from).collect())
-}
-
-fn approved(v: &Vault, name: &str) -> Option<Memory> {
-    v.approved_version(name).ok().flatten().map(|t| Memory::parse(name, &t))
-}
-
-/// Same text as the last approved version (only who sees it changed).
-fn same_content(v: &Vault, m: &Memory) -> bool {
-    approved(v, &m.name).is_some_and(|o| o.body.trim() == m.body.trim() && o.description == m.description && o.kind == m.kind)
-}
-
-/// Every memory of a change: its line, then its diff (or a removed memory's text).
-fn print_members(v: &Vault, p: &Pending) -> Result<()> {
-    let ops = p.ops();
-    for (op, line) in ops.iter().zip(describe(v, &ops, true)) {
-        let body = match op {
-            Op::Write(m) if !same_content(v, m) => diff_lines(v, m)?,
-            Op::Remove { name, .. } => {
-                let text = p.members.iter().find(|m| &m.name == name).map(|m| m.body.trim().to_string()).unwrap_or_default();
-                text.lines().map(|l| dim(&format!("│ {l}"))).collect()
-            }
-            _ => vec![],
-        };
-        eprintln!("  {}", if line.starts_with('✗') { red(&line) } else { bold(&line) });
-        body.iter().for_each(|l| eprintln!("    {l}"));
-    }
-    Ok(())
-}
-
-/// What yes and what no do to a change, in plain words.
-fn outcomes(v: &Vault, p: &Pending) -> (String, String) {
-    let (mut yes, mut deleted) = (vec![], vec![]);
-    for op in p.ops() {
-        match op {
-            Op::Write(m) if approved(v, &m.name).is_some() => yes.push(format!("update {}", m.name)),
-            Op::Write(m) => yes.push(format!("add {}", m.name)),
-            Op::Rename { from, to } => yes.push(format!("rename {from} to {to}")),
-            Op::Scope { name, .. } => yes.push(format!("update {name}")),
-            Op::Remove { name, .. } => deleted.push(name),
-        }
-    }
-    let kept = if deleted.is_empty() { "" } else { " (kept in history)" };
-    match deleted.len() {
-        0 => {}
-        1 => yes.push(format!("delete {}", deleted[0])),
-        n if yes.is_empty() => yes.push(format!("delete these {n}")),
-        n => yes.push(format!("delete the other {n}")),
-    }
-    let (old, new): (Vec<&Memory>, Vec<&Memory>) = p.members.iter().partition(|m| approved(v, &m.name).is_some());
-    let mut no: Vec<String> = new.iter().filter(|m| !m.extra.contains_key("renamed_from")).map(|m| format!("don't add {}", m.name)).collect();
-    match old.len() {
-        0 => {}
-        1 => no.push(format!("leave {} as it was", old[0].name)),
-        n => no.push(format!("leave all {n} as they were")),
-    }
-    (format!("{}{kept}", yes.join(", ")), no.join(", "))
-}
-
-/// One pending change, as the user decides it.
-fn print_pending(v: &Vault, p: &Pending, i: usize, total: usize) -> Result<()> {
-    let age = p.members.iter().filter_map(Memory::updated).max().map(hippo::util::ago).unwrap_or_default();
-    let by = if p.meta.by.is_empty() { String::new() } else { format!(" · by {}", p.meta.by) };
-    eprintln!("{}  {}{}", dim(&format!("{i}/{total}")), bold(&p.meta.title), dim(&format!("{by} · {age}")));
-    if !p.meta.why.is_empty() {
-        eprintln!("     {}", dim(&format!("why: {}", p.meta.why)));
-    }
-    eprintln!();
-    print_members(v, p)?;
-    let (yes, no) = outcomes(v, p);
-    eprintln!("\n  {} {yes}\n  {}  {no}\n", green("yes:"), red("no:"));
-    Ok(())
 }
 
 fn status_json(v: &Vault, s: &backup::Status) -> Value {
@@ -1024,19 +946,19 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Review => {
             let v = open_vault(cli)?;
-            let pending: Vec<Pending> = v.pending_changes()?.into_iter().filter(|p| p.members.iter().all(|m| out.in_scope(&v, m))).collect();
+            let pending: Vec<Pending> = v.pending_changes()?.into_iter().filter(|p| out.sees_change(&v, p)).collect();
+            let human = out.sees_all() && std::io::stdin().is_terminal();
+            let mut diff = String::new();
+            for p in &pending {
+                let why = if p.meta.why.is_empty() { String::new() } else { format!(" · {}", p.meta.why) };
+                diff += &bold(&format!("# {} · by {}{why}\n", p.meta.title, p.meta.by));
+                diff += &v.diff_change(p, human && ui::color())?;
+                diff += "\n";
+            }
             // Agents can see what is waiting; only the user decides.
-            if !out.sees_all() || !std::io::stdin().is_terminal() {
-                let rows: Vec<Value> = pending
-                    .iter()
-                    .map(|p| {
-                        let names: Vec<&str> = p.members.iter().map(|m| m.name.as_str()).collect();
-                        json!({"id": p.id, "title": p.meta.title, "why": p.meta.why, "by": p.meta.by, "lines": describe(&v, &p.ops(), true), "memories": names})
-                    })
-                    .collect();
-                out.done(json!({"pending": rows, "note": "only the user can approve: they run `hippo review` in a terminal"}), || {
-                    pending.iter().map(|p| format!("{}\n{}", bold(&p.meta.title), describe(&v, &p.ops(), true).iter().map(|l| format!("  {l}\n")).collect::<String>())).collect()
-                });
+            if !human {
+                let note = "only the user can approve: `/hippo review` in Claude Code, or `hippo review` in a terminal";
+                out.done(json!({"changes": pending.len(), "diff": diff, "note": note}), || diff.clone());
                 return Ok(());
             }
             // Memories scoped to a project no folder matches: no agent can see them.
@@ -1059,23 +981,14 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 out.say(format!("{} nothing to review", green("✓")));
                 return Ok(());
             }
-            let memories: usize = pending.iter().map(|p| p.members.len()).sum();
+            print!("{diff}");
             let (n, s) = (pending.len(), if pending.len() == 1 { "" } else { "s" });
-            out.say(format!("🦛 {n} change{s} to review ({memories} memor{})\n", if memories == 1 { "y" } else { "ies" }));
-            for (i, p) in pending.iter().enumerate() {
-                print_pending(&v, p, i + 1, pending.len())?;
-                let done = loop {
-                    let r = match prompt("Apply? [y]es [n]o [s]kip [q]uit", "s")?.as_str() {
-                        "y" => v.approve_change(p).map(|_| green("✓ applied")),
-                        "n" => v.reject_change(p).map(|_| yellow("↩ left as it was")),
-                        "s" => Ok(dim("skipped")),
-                        "q" => break None,
-                        _ => continue,
-                    };
-                    break Some(r.unwrap_or_else(|e| yellow(&format!("{e:#}"))));
-                };
-                let Some(done) = done else { break };
-                eprintln!("  {done}\n");
+            if prompt(&format!("Apply all {n} change{s}?"), "y/N")?.eq_ignore_ascii_case("y") {
+                let failed: Vec<String> = pending.iter().filter_map(|p| v.approve_change(p).err().map(|e| format!("{}: {e:#}", p.meta.title))).collect();
+                out.say(format!("{} applied {}", green("✓"), n - failed.len()));
+                for f in failed {
+                    out.say(yellow(&format!("  not applied: {f}")));
+                }
             }
             claude_follows(&v, out);
             Ok(())

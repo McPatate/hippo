@@ -303,6 +303,34 @@ impl Vault {
         Ok(out)
     }
 
+    /// A pending change as a git diff against what the user last approved: renames show as
+    /// renames, new and deleted memories as such, a rescope as its `visibility` line.
+    pub fn diff_change(&self, p: &Pending, color: bool) -> Result<String> {
+        let dir = self.meta_dir().join("review");
+        let _ = std::fs::remove_dir_all(&dir);
+        for m in &p.members {
+            if let Some(t) = self.approved_version(&m.name)? {
+                let path = dir.join("a/memories").join(format!("{}.md", m.name));
+                std::fs::create_dir_all(path.parent().unwrap())?;
+                std::fs::write(path, Memory::parse(&m.name, &t).content().render())?;
+            }
+            if m.status() != Some("forget") {
+                let path = dir.join("b/memories").join(format!("{}.md", m.name));
+                std::fs::create_dir_all(path.parent().unwrap())?;
+                std::fs::write(path, m.content().render())?;
+            }
+        }
+        for side in ["a", "b"] {
+            std::fs::create_dir_all(dir.join(side))?;
+        }
+        let out = std::process::Command::new("git")
+            .current_dir(&dir)
+            .args(["diff", "--no-index", "--no-prefix", "-M", if color { "--color=always" } else { "--color=never" }, "a", "b"])
+            .output()?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
     /// Take a pending change as a whole (one commit).
     pub fn approve_change(&self, p: &Pending) -> Result<Option<String>> {
         self.decide(p, true)
@@ -352,6 +380,26 @@ pub struct Pending {
 }
 
 impl Pending {
+    /// Reviewable from `scope`: each memory is seen there now or was before the change, so a
+    /// memory moved to another project can still be decided where it came from.
+    pub fn visible_in(&self, vault: &Vault, scope: &crate::project::Scope) -> bool {
+        self.members.iter().all(|m| {
+            m.visible_in(scope) || vault.approved_version(&m.name).ok().flatten().is_some_and(|t| Memory::parse(&m.name, &t).visible_in(scope))
+        })
+    }
+
+    /// Where its memories are seen: project keys, `everywhere` or `private`.
+    pub fn places(&self) -> BTreeSet<String> {
+        self.members
+            .iter()
+            .map(|m| match m.visibility() {
+                Visibility::All => "everywhere".into(),
+                Visibility::Private => "private".into(),
+                Visibility::Project(p) => p,
+            })
+            .collect()
+    }
+
     /// The change as operations, rebuilt from its files (for `describe`).
     pub fn ops(&self) -> Vec<Op> {
         let mut ops = vec![];

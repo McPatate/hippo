@@ -209,7 +209,7 @@ fn declined_claude_memories_are_never_touched() {
 }
 
 #[test]
-fn agents_see_a_pending_change_as_one() {
+fn agents_get_pending_changes_as_a_diff() {
     use hippo::change::{Change, Op};
     let (t, v) = vault();
     v.remember(&mem("pr-style", "Conventional commits.")).unwrap();
@@ -225,9 +225,9 @@ fn agents_see_a_pending_change_as_one() {
         .output()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    let pending = json["pending"].as_array().unwrap();
-    assert_eq!(pending.len(), 1, "{json}");
-    assert_eq!((pending[0]["title"].as_str(), pending[0]["why"].as_str()), (Some("merge into pr-style"), Some("same thing")));
-    assert_eq!(pending[0]["memories"], serde_json::json!(["atomic-prs", "pr-style"]));
-    assert_eq!(pending[0]["lines"], serde_json::json!(["✗ delete atomic-prs (its content is in pr-style)", "✎ edit pr-style (content)"]));
+    assert_eq!(json["changes"], 1, "{json}");
+    let diff = json["diff"].as_str().unwrap();
+    assert!(diff.starts_with("# merge into pr-style · by claude-code · same thing\n"), "{diff}");
+    assert!(diff.contains("deleted file mode") && diff.contains("--- a/memories/atomic-prs.md"), "{diff}");
+    assert!(diff.contains("+Conventional commits. One intent per PR."), "{diff}");
 }
