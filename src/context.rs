@@ -4,8 +4,10 @@
 use crate::memory::{Memory, Visibility};
 use crate::project::Scope;
 
-/// Characters, header included. Claude Code moves hook output over 10k to a file.
-pub const BUDGET: usize = 8000;
+/// Characters, header included: Claude Code moves hook output over 10,000 characters to a file
+/// and shows the agent only a 2,000-character preview. Only the index is capped; memories
+/// themselves can be any size.
+pub const BUDGET: usize = 9500;
 
 /// This project's memories first, then how the user wants agents to work, then the rest;
 /// newest first within each group. Lines are cut once `budget` is reached.
