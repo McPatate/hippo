@@ -9,6 +9,7 @@ Everything needed to read a hippo vault or backup **without hippo**.
   memories/<slug>.md     one memory per file
   projects.toml          project keys → how to recognize them (git root commits, folder paths)
   imported.toml          other agents' memory files → hash when last imported or skipped (each change is taken once)
+  changes.toml           changes waiting for review → title, why, by, at (gone once decided)
   media/                 any files
   .git/                  plain git repo, branch `main`
   .hippo/                local-only (gitignored): vault.toml, state.json, index.sqlite, outbox/, merges/
@@ -26,6 +27,7 @@ visibility: all | private | project:<key>   # who may read it (default all)
 by: user | <agent>          # who wrote this version
 updated: 2026-11-09T12:00:00Z
 status: draft | forget      # an agent change the user hasn't reviewed (absent = confirmed)
+change: 3fa9c1              # the pending change it belongs to (with `into:` / `renamed_from:`)
 ---
 Body (Markdown).
 ```
@@ -38,7 +40,7 @@ roots = ["9f1c…"]
 paths = ["/Users/me/work/safetensors"]
 ```
 
-Agent writes are drafts until the user approves them (`hippo review`). Rejecting restores the last version without `status`; an agent's `forget` hides the memory from agents until the user approves the removal.
+Agent writes are drafts until the user approves them (`hippo review`). Rejecting restores the last version without `status`; an agent's `forget` hides the memory from agents until the user approves the removal. A change (a merge, rename, rescope…) groups the files it touches: the user takes or leaves it as a whole, and approving drops the review fields.
 
 ## Key
 

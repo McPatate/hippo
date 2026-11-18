@@ -125,9 +125,13 @@ impl Memory {
 }
 
 /// Provenance lives in the file so it travels with it: who last changed a memory (`by`), when
-/// (`updated`), and `status` while the user hasn't reviewed an agent's change yet
-/// (`draft`: new or edited, `forget`: the agent asked to remove it).
-const PROVENANCE: &[&str] = &["by", "updated", "status"];
+/// (`updated`), and while the user hasn't reviewed an agent's change yet, the [`REVIEW`] fields.
+const PROVENANCE: &[&str] = &["by", "updated", "status", "change", "into", "renamed_from"];
+
+/// Only on a change waiting for review: `status` (`draft`: new or edited, `forget`: to be
+/// removed), `change` (the id of the change it belongs to, see `change.rs`), `into` (a removed
+/// memory's content now lives there) and `renamed_from`.
+pub const REVIEW: &[&str] = &["status", "change", "into", "renamed_from"];
 
 impl Memory {
     pub fn status(&self) -> Option<&str> {
@@ -136,6 +140,11 @@ impl Memory {
 
     pub fn needs_review(&self) -> bool {
         self.status().is_some()
+    }
+
+    /// Drop the review fields: the change is decided.
+    pub fn settle(&mut self) {
+        self.extra.retain(|k, _| !REVIEW.contains(&k.as_str()));
     }
 
     pub fn updated(&self) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -167,10 +176,10 @@ impl Memory {
         }
         self.extra.insert("by".into(), agent.unwrap_or("user").into());
         self.extra.insert("updated".into(), chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string());
-        match agent {
-            Some(_) => self.extra.insert("status".into(), "draft".into()),
-            None => self.extra.remove("status"),
-        };
+        self.extra.retain(|k, _| !REVIEW.contains(&k.as_str()));
+        if agent.is_some() {
+            self.extra.insert("status".into(), "draft".into());
+        }
     }
 
     /// "unconfirmed, by claude-code, 12 days ago". `fallback` is the time from history when the

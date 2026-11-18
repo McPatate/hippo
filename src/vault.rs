@@ -221,7 +221,7 @@ impl Vault {
         Ok(commit)
     }
 
-    fn rel(&self, p: &Path) -> String {
+    pub(crate) fn rel(&self, p: &Path) -> String {
         p.strip_prefix(&self.root).unwrap_or(p).to_string_lossy().replace('\\', "/")
     }
 
@@ -294,7 +294,7 @@ impl Vault {
             fs::remove_file(&path)?;
             format!("forget: {} (approved)", m.name)
         } else {
-            m.extra.remove("status");
+            m.settle();
             self.write_memory(&m)?;
             format!("approve: {}", m.name)
         };
