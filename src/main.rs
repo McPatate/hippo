@@ -707,8 +707,8 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let r = hippo::connect::connect_claude(!*no_statusline, *pixel)?;
             out.done(json!(r), || {
                 format!(
-                    "{} Claude Code connected\n  MCP          {}\n  instructions {}\n  status line  {}\n  file access  {}\n  → Restart Claude Code to load hippo. Undo anytime: `hippo disconnect claude`",
-                    green("✓"), r.mcp, r.instructions, r.statusline, r.file_access
+                    "{} Claude Code connected\n  MCP          {}\n  instructions {}\n  status line  {}\n  file access  {}\n  context      {}\n  → Restart Claude Code to load hippo. Undo anytime: `hippo disconnect claude`",
+                    green("✓"), r.mcp, r.instructions, r.statusline, r.file_access, r.session_start
                 )
             });
             Ok(())
@@ -717,8 +717,8 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let r = hippo::connect::disconnect_claude()?;
             out.done(json!(r), || {
                 format!(
-                    "{} Claude Code disconnected\n  MCP          {}\n  instructions {}\n  status line  {}\n  file access  {}\n  Your vault and backups are untouched.",
-                    green("✓"), r.mcp, r.instructions, r.statusline, r.file_access
+                    "{} Claude Code disconnected\n  MCP          {}\n  instructions {}\n  status line  {}\n  file access  {}\n  context      {}\n  Your vault and backups are untouched.",
+                    green("✓"), r.mcp, r.instructions, r.statusline, r.file_access, r.session_start
                 )
             });
             Ok(())

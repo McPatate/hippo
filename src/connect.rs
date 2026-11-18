@@ -1,6 +1,7 @@
 //! Wire hippo into an agent harness (and back out). Claude Code for now:
 //! - MCP server registered at **user** scope (every project), via the `claude` CLI;
 //! - a delimited memory-instructions block in `~/.claude/CLAUDE.md`;
+//! - a `SessionStart` hook that hands the agent its memory index (also after a compaction);
 //! - optionally the status line, wrapping any existing one (restored on disconnect).
 //!
 //! Everything is reversible with `hippo disconnect claude`.
@@ -15,7 +16,7 @@ const END: &str = "<!-- hippo:end -->";
 const BLOCK: &str = "# Memory
 
 Use the **hippo** MCP server as long-term memory (the user's own encrypted, portable vault):
-- At the start of a task, `search_memories` / `list_memories` for relevant context.
+- Each session starts with an index of the memories for this project: `recall` what is relevant to the task, `search_memories` for anything else.
 - Save durable facts, preferences and feedback with `remember` (one topic per memory, short kebab-case names; update instead of duplicating).
 - Do not write file-based memories under `~/.claude/projects/*/memory/`; hippo replaces them.
 - Memories are general guidance from past sessions and can be outdated; what the user says now wins. Your writes are drafts until the user approves them (`hippo review`).
@@ -53,6 +54,7 @@ pub struct Report {
     pub instructions: String,
     pub statusline: String,
     pub file_access: String,
+    pub session_start: String,
 }
 
 /// Is hippo registered as a user-scope MCP server?
@@ -155,6 +157,53 @@ fn save_settings(v: &Value) -> Result<()> {
         std::fs::copy(&p, &backup)?; // one-time safety copy of the original
     }
     crate::util::atomic_write(&p, format!("{}\n", serde_json::to_string_pretty(v)?).as_bytes())
+}
+
+fn is_our_hook(h: &Value) -> bool {
+    h["hooks"].as_array().is_some_and(|hs| hs.iter().any(|c| c["command"].as_str().is_some_and(|c| c.ends_with(" context") && c.contains("hippo"))))
+}
+
+/// `SessionStart` runs on startup, resume, `/clear` and after a compaction: each time, the agent
+/// gets the memory index for its folder.
+fn connect_session_start() -> Result<String> {
+    let mut settings = load_settings()?;
+    let obj = settings.as_object_mut().context("settings.json is not a JSON object")?;
+    let list = obj
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("hooks is not an object")?
+        .entry("SessionStart")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .context("hooks.SessionStart is not a list")?;
+    let ours = json!({"hooks": [{"type": "command", "command": format!("{} context", sh_quote(&exe()))}]});
+    if list.contains(&ours) {
+        return Ok("already present".into());
+    }
+    list.retain(|h| !is_our_hook(h)); // an older binary path
+    list.push(ours);
+    save_settings(&settings)?;
+    Ok("memory index at session start and after compaction".into())
+}
+
+fn disconnect_session_start() -> Result<String> {
+    let mut settings = load_settings()?;
+    let Some(hooks) = settings.get_mut("hooks").and_then(Value::as_object_mut) else { return Ok("untouched".into()) };
+    let Some(list) = hooks.get_mut("SessionStart").and_then(Value::as_array_mut) else { return Ok("untouched".into()) };
+    let before = list.len();
+    list.retain(|h| !is_our_hook(h));
+    if list.len() == before {
+        return Ok("untouched".into());
+    }
+    if list.is_empty() {
+        hooks.remove("SessionStart");
+    }
+    if hooks.is_empty() {
+        settings.as_object_mut().unwrap().remove("hooks");
+    }
+    save_settings(&settings)?;
+    Ok("removed".into())
 }
 
 fn is_ours(cmd: &str) -> bool {
@@ -340,6 +389,7 @@ pub fn connect_claude(statusline: bool, pixel: bool) -> Result<Report> {
         instructions: write_instructions()?,
         statusline: if statusline { connect_statusline(pixel)? } else { "skipped".into() },
         file_access: connect_file_access()?,
+        session_start: connect_session_start()?,
     })
 }
 
@@ -349,6 +399,7 @@ pub fn disconnect_claude() -> Result<Report> {
         instructions: remove_instructions()?,
         statusline: disconnect_statusline()?,
         file_access: disconnect_file_access()?,
+        session_start: disconnect_session_start()?,
     })
 }
 
