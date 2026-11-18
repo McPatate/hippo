@@ -59,6 +59,9 @@ enum Cmd {
         kind: String,
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
+        /// `all`, `private` (never shown to agents), `project` (this folder's) or `project:<key>`
+        #[arg(long)]
+        visibility: Option<String>,
         /// Save even if it looks like it contains a secret (humans only)
         #[arg(long)]
         allow_secret: bool,
@@ -841,7 +844,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             });
             Ok(())
         }
-        Cmd::Add { name, message, description, kind, tags, allow_secret } => {
+        Cmd::Add { name, message, description, kind, tags, visibility, allow_secret } => {
             if !KINDS.contains(&kind.as_str()) {
                 bail!("--type must be one of {}", KINDS.join(", "));
             }
@@ -859,6 +862,25 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 extra: existing.map(|e| e.extra).unwrap_or_default(),
                 body,
             };
+            let mut m = m;
+            match visibility.as_deref().map(str::trim) {
+                None => {}
+                Some("all") => drop(m.extra.remove("visibility")),
+                Some("private") => drop(m.extra.insert("visibility".into(), "private".into())),
+                Some(vis) if vis == "project" || vis.starts_with("project:") => {
+                    let key = match vis.strip_prefix("project:").map(str::trim) {
+                        Some(k) => hippo::memory::slugify(k),
+                        None => hippo::project::Scope::here(&v, &std::env::current_dir()?).keys.into_iter().next().context(
+                            "this folder is not part of a project\n  → `hippo project link <key>`, or pass `--visibility project:<key>`",
+                        )?,
+                    };
+                    if !hippo::project::Registry::load(&v.root)?.projects.contains_key(&key) {
+                        bail!("no project `{key}`\n  → `hippo project link {key} <dir>` first");
+                    }
+                    m.extra.insert("visibility".into(), format!("project:{key}"));
+                }
+                Some(vis) => bail!("--visibility `{vis}`: use all, private, project or project:<key>"),
+            }
             let found = hippo::secrets::heuristic(&m.render());
             if !found.is_empty() {
                 let what = hippo::secrets::describe(&found);

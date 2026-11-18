@@ -36,3 +36,28 @@ fn every_subcommand_parses() {
         assert!(o.status.success(), "`hippo {c} --help` failed: {}", String::from_utf8_lossy(&o.stderr));
     }
 }
+
+#[test]
+fn add_sets_visibility_only_for_known_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let vault = tmp.path().join("v");
+    let key = hippo::crypto::Key::generate(&tmp.path().join("key.txt")).unwrap();
+    let v = hippo::vault::Vault::init(&vault, &key).unwrap();
+    v.update_registry("projects: link", |r| r.learn("st", &hippo::project::Ident::of(tmp.path()))).unwrap();
+    let add = |vis: &str| {
+        Command::new(env!("CARGO_BIN_EXE_hippo"))
+            .current_dir(tmp.path())
+            .env("HIPPO_HOME", tmp.path())
+            .args(["--human", "--vault"])
+            .arg(&vault)
+            .args(["add", "signoff", "-m", "Commit with -s.", "--visibility", vis])
+            .output()
+            .unwrap()
+    };
+    assert!(add("project:st").status.success());
+    assert_eq!(v.read_memory("signoff").unwrap().extra.get("visibility").map(String::as_str), Some("project:st"));
+    let out = add("project:nope");
+    assert!(!out.status.success() && String::from_utf8_lossy(&out.stderr).contains("no project `nope`"));
+    assert!(add("all").status.success());
+    assert!(!v.read_memory("signoff").unwrap().extra.contains_key("visibility"));
+}
