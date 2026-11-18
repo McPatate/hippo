@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hippo::backup::{self, RestoreOptions};
+use hippo::change::{Op, Pending, describe};
 use hippo::config::{self, GlobalConfig, RemoteConfig};
 use hippo::crypto::Key;
 use hippo::index::Index;
@@ -239,9 +240,12 @@ impl Out {
     /// Agents only see memories scoped to their working folder (same rule as MCP); humans see all.
     /// Keyed on the agent environment, not the output mode, so `--human` is no way around it.
     fn sees(&self, v: &Vault, m: &Memory) -> bool {
-        self.sees_all()
-            || (m.status() != Some("forget")
-                && m.visible_in(self.scope.get_or_init(|| hippo::project::Scope::here(v, &std::env::current_dir().unwrap_or_default()))))
+        self.sees_all() || (m.status() != Some("forget") && self.in_scope(v, m))
+    }
+
+    /// Scoped to the agent's working folder, whatever its review status.
+    fn in_scope(&self, v: &Vault, m: &Memory) -> bool {
+        self.sees_all() || m.visible_in(self.scope.get_or_init(|| hippo::project::Scope::here(v, &std::env::current_dir().unwrap_or_default())))
     }
 
     /// Who is writing: `None` for the user, else the agent (its changes wait for review).
@@ -376,22 +380,120 @@ fn read_body(agent: bool, message: Option<String>, existing: Option<&str>) -> Re
     Ok(body)
 }
 
-/// The pending change as a diff against the last approved version.
-fn print_change(v: &Vault, m: &Memory) -> Result<()> {
-    if m.status() == Some("forget") {
-        eprintln!("{}", red("  asks to remove this memory"));
-        return Ok(());
-    }
+/// A memory's diff against the last approved version, without git's header.
+fn diff_lines(v: &Vault, m: &Memory) -> Result<Vec<String>> {
     let (base, now) = (v.meta_dir().join("review-base.md"), v.meta_dir().join("review-now.md"));
     let approved = v.approved_version(&m.name)?.map(|t| Memory::parse(&m.name, &t).content().render());
     std::fs::write(&base, approved.unwrap_or_default())?;
     std::fs::write(&now, m.content().render())?;
     let color = if ui::color() { "--color=always" } else { "--color=never" };
-    let d = v.git.try_run(["diff", "--no-index", color, &base.to_string_lossy(), &now.to_string_lossy()])?;
+    let d = v.git.try_run(["diff", "--no-index", "--unified=1", color,&base.to_string_lossy(), &now.to_string_lossy()])?;
     let _ = (std::fs::remove_file(&base), std::fs::remove_file(&now));
-    // Skip the `diff --git` / `index` / `---` / `+++` header.
-    eprintln!("{}", d.stdout.lines().skip_while(|l| !l.contains("@@")).collect::<Vec<_>>().join("\n"));
+    Ok(d.stdout.lines().skip_while(|l| !l.contains("@@")).map(String::from).collect())
+}
+
+fn approved(v: &Vault, name: &str) -> Option<Memory> {
+    v.approved_version(name).ok().flatten().map(|t| Memory::parse(name, &t))
+}
+
+/// Same text as the last approved version (only who sees it changed).
+fn same_content(v: &Vault, m: &Memory) -> bool {
+    approved(v, &m.name).is_some_and(|o| o.body.trim() == m.body.trim() && o.description == m.description && o.kind == m.kind)
+}
+
+/// `lines`, cut to `max` unless `full`, with `more` standing for the rest.
+fn cut(lines: Vec<String>, max: usize, full: bool, more: &str) -> Vec<String> {
+    if full || lines.len() <= max {
+        return lines;
+    }
+    let mut l: Vec<String> = lines.into_iter().take(max).collect();
+    l.push(dim(more));
+    l
+}
+
+/// Every memory of a change: its line, then its diff (or a removed memory's text).
+fn print_members(v: &Vault, p: &Pending, full: bool) -> Result<()> {
+    let ops = p.ops();
+    for (op, line) in ops.iter().zip(describe(v, &ops, true)) {
+        let body = match op {
+            Op::Write(m) if !same_content(v, m) => cut(diff_lines(v, m)?, 6, full, "… (v to see all)"),
+            Op::Remove { name, .. } => {
+                let text = p.members.iter().find(|m| &m.name == name).map(|m| m.body.trim().to_string()).unwrap_or_default();
+                cut(text.lines().map(|l| dim(&format!("│ {l}"))).collect(), 3, full, "│ …")
+            }
+            _ => vec![],
+        };
+        eprintln!("  {}", if line.starts_with('✗') { red(&line) } else { bold(&line) });
+        body.iter().for_each(|l| eprintln!("    {l}"));
+    }
     Ok(())
+}
+
+/// What yes and what no do to a change, in plain words.
+fn outcomes(v: &Vault, p: &Pending) -> (String, String) {
+    let (mut yes, mut deleted) = (vec![], vec![]);
+    for op in p.ops() {
+        match op {
+            Op::Write(m) if approved(v, &m.name).is_some() => yes.push(format!("update {}", m.name)),
+            Op::Write(m) => yes.push(format!("add {}", m.name)),
+            Op::Rename { from, to } => yes.push(format!("rename {from} to {to}")),
+            Op::Scope { name, .. } => yes.push(format!("update {name}")),
+            Op::Remove { name, .. } => deleted.push(name),
+        }
+    }
+    let kept = if deleted.is_empty() { "" } else { " (kept in history)" };
+    match deleted.len() {
+        0 => {}
+        1 => yes.push(format!("delete {}", deleted[0])),
+        n if yes.is_empty() => yes.push(format!("delete these {n}")),
+        n => yes.push(format!("delete the other {n}")),
+    }
+    let (old, new): (Vec<&Memory>, Vec<&Memory>) = p.members.iter().partition(|m| approved(v, &m.name).is_some());
+    let mut no: Vec<String> = new.iter().filter(|m| !m.extra.contains_key("renamed_from")).map(|m| format!("don't add {}", m.name)).collect();
+    match old.len() {
+        0 => {}
+        1 => no.push(format!("leave {} as it was", old[0].name)),
+        n => no.push(format!("leave all {n} as they were")),
+    }
+    (format!("{}{kept}", yes.join(", ")), no.join(", "))
+}
+
+/// One pending change, as the user decides it.
+fn print_pending(v: &Vault, p: &Pending, i: usize, total: usize, full: bool) -> Result<()> {
+    let age = p.members.iter().filter_map(Memory::updated).max().map(hippo::util::ago).unwrap_or_default();
+    let by = if p.meta.by.is_empty() { String::new() } else { format!(" · by {}", p.meta.by) };
+    eprintln!("{}  {}{}", dim(&format!("{i}/{total}")), bold(&p.meta.title), dim(&format!("{by} · {age}")));
+    if !p.meta.why.is_empty() {
+        eprintln!("     {}", dim(&format!("why: {}", p.meta.why)));
+    }
+    eprintln!();
+    print_members(v, p, full)?;
+    let (yes, no) = outcomes(v, p);
+    eprintln!("\n  {} {yes}\n  {}  {no}\n", green("yes:"), red("no:"));
+    Ok(())
+}
+
+/// Take, leave, or edit-then-take a change; `None` to ask again.
+fn decide(v: &Vault, p: &Pending, answer: &str) -> Result<Option<String>> {
+    let single = match p.ops().as_slice() {
+        [Op::Write(m)] => Some(m.name.clone()),
+        _ => None,
+    };
+    Ok(Some(match (answer, single) {
+        ("y", _) => v.approve_change(p).map(|_| green("✓ applied"))?,
+        ("n", _) => v.reject_change(p).map(|_| yellow("↩ left as it was"))?,
+        ("e", Some(name)) => {
+            edit_file(&v.memory_path(&name))?;
+            let edited = Pending { members: vec![v.read_memory(&name)?], ..p.clone() };
+            v.approve_change(&edited).map(|_| green("✓ edited and applied"))?
+        }
+        ("e", None) => {
+            eprintln!("  {}", dim("editing is only for a change to one memory"));
+            return Ok(None);
+        }
+        ("s", _) => dim("skipped"),
+        _ => return Ok(None),
+    }))
 }
 
 fn edit_file(path: &std::path::Path) -> Result<()> {
@@ -964,14 +1066,19 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
         }
         Cmd::Review => {
             let v = open_vault(cli)?;
-            let pending: Vec<Memory> = v.pending_review()?.into_iter().filter(|m| out.sees(&v, m)).collect();
+            let pending: Vec<Pending> = v.pending_changes()?.into_iter().filter(|p| p.members.iter().all(|m| out.in_scope(&v, m))).collect();
             // Agents can see what is waiting; only the user decides.
             if !out.sees_all() || !std::io::stdin().is_terminal() {
-                out.done(
-                    json!({"pending": pending.iter().map(|m| json!({"name": m.name, "status": m.status(), "by": m.extra.get("by"), "updated": m.extra.get("updated")})).collect::<Vec<_>>(),
-                           "note": "only the user can approve: they run `hippo review` in a terminal"}),
-                    || pending.iter().map(|m| format!("{:<32} {}\n", bold(&m.name), dim(&m.provenance(None)))).collect(),
-                );
+                let rows: Vec<Value> = pending
+                    .iter()
+                    .map(|p| {
+                        let names: Vec<&str> = p.members.iter().map(|m| m.name.as_str()).collect();
+                        json!({"id": p.id, "title": p.meta.title, "why": p.meta.why, "by": p.meta.by, "lines": describe(&v, &p.ops(), true), "memories": names})
+                    })
+                    .collect();
+                out.done(json!({"pending": rows, "note": "only the user can approve: they run `hippo review` in a terminal"}), || {
+                    pending.iter().map(|p| format!("{}\n{}", bold(&p.meta.title), describe(&v, &p.ops(), true).iter().map(|l| format!("  {l}\n")).collect::<String>())).collect()
+                });
                 return Ok(());
             }
             // Memories scoped to a project no folder matches: no agent can see them.
@@ -994,30 +1101,34 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 out.say(format!("{} nothing to review", green("✓")));
                 return Ok(());
             }
-            out.say(format!("🦛 {} change(s) to review\n", pending.len()));
-            'review: for m in &pending {
-                eprintln!("{} {}", bold(&m.name), dim(&format!("· {}", m.provenance(None))));
-                print_change(&v, m)?;
+            let memories: usize = pending.iter().map(|p| p.members.len()).sum();
+            let (n, s) = (pending.len(), if pending.len() == 1 { "" } else { "s" });
+            out.say(format!("🦛 {n} change{s} to review ({memories} memor{})\n", if memories == 1 { "y" } else { "ies" }));
+            'review: for (i, p) in pending.iter().enumerate() {
+                let mut full = false;
                 loop {
-                    let answer = prompt("[a]pprove [r]eject [e]dit [s]kip [q]uit", "s")?;
-                    // Only act on the version that was shown.
-                    if matches!(answer.as_str(), "a" | "r" | "e") && v.read_memory(&m.name).ok().as_ref() != Some(m) {
-                        eprintln!("  {}\n", yellow("changed while you were reviewing; skipped (run `hippo review` again)"));
-                        break;
-                    }
-                    let done = match answer.as_str() {
-                        "a" => v.approve(&m.name).map(|_| green("✓ approved"))?,
-                        "r" => v.reject(&m.name).map(|_| yellow("↩ rejected"))?,
-                        "e" if m.status() != Some("forget") => {
-                            edit_file(&v.memory_path(&m.name))?;
-                            v.approve(&m.name).map(|_| green("✓ edited and approved"))?
+                    print_pending(&v, p, i + 1, pending.len(), full)?;
+                    let answer = loop {
+                        match prompt("Apply? [y]es [n]o [v]iew all [e]dit [s]kip [q]uit", "s")?.as_str() {
+                            "q" => break 'review,
+                            "v" => break None,
+                            a => match decide(&v, p, a) {
+                                Ok(None) => continue,
+                                Ok(done) => break done,
+                                Err(e) => break Some(yellow(&format!("{e:#}"))),
+                            },
                         }
-                        "s" => dim("skipped"),
-                        "q" => break 'review,
-                        _ => continue,
                     };
-                    eprintln!("  {done}\n");
-                    break;
+                    match answer {
+                        Some(done) => {
+                            eprintln!("  {done}\n");
+                            break;
+                        }
+                        None => {
+                            full = true;
+                            eprintln!();
+                        }
+                    }
                 }
             }
             claude_follows(&v, out);

@@ -207,3 +207,27 @@ fn declined_claude_memories_are_never_touched() {
     write_back_claude(&v, &from).unwrap();
     assert!(dir.join("mine.md").exists());
 }
+
+#[test]
+fn agents_see_a_pending_change_as_one() {
+    use hippo::change::{Change, Op};
+    let (t, v) = vault();
+    v.remember(&mem("pr-style", "Conventional commits.")).unwrap();
+    v.remember(&mem("atomic-prs", "One intent per PR.")).unwrap();
+    let ops = vec![Op::Write(mem("pr-style", "Conventional commits. One intent per PR.")), Op::Remove { name: "atomic-prs".into(), into: Some("pr-style".into()) }];
+    v.apply_changes(&[Change { title: "merge into pr-style".into(), why: "same thing".into(), ops }], "claude-code", false).unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_hippo"))
+        .current_dir(t.path())
+        .env("HIPPO_HOME", t.path())
+        .args(["--agent", "--vault"])
+        .arg(&v.root)
+        .arg("review")
+        .output()
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let pending = json["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "{json}");
+    assert_eq!((pending[0]["title"].as_str(), pending[0]["why"].as_str()), (Some("merge into pr-style"), Some("same thing")));
+    assert_eq!(pending[0]["memories"], serde_json::json!(["atomic-prs", "pr-style"]));
+    assert_eq!(pending[0]["lines"], serde_json::json!(["✗ delete atomic-prs (its content is in pr-style)", "✎ edit pr-style (content)"]));
+}
