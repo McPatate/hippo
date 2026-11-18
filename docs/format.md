@@ -8,7 +8,7 @@ Everything needed to read a hippo vault or backup **without hippo**.
 <vault>/
   memories/<slug>.md     one memory per file
   projects.toml          project keys → how to recognize them (git root commits, folder paths)
-  imported.toml          other agents' memory files → hash when last imported (each change is taken once)
+  imported.toml          other agents' memory files → hash when last imported or skipped (each change is taken once)
   media/                 any files
   .git/                  plain git repo, branch `main`
   .hippo/                local-only (gitignored): vault.toml, state.json, index.sqlite, outbox/, merges/
