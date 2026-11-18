@@ -401,25 +401,15 @@ fn same_content(v: &Vault, m: &Memory) -> bool {
     approved(v, &m.name).is_some_and(|o| o.body.trim() == m.body.trim() && o.description == m.description && o.kind == m.kind)
 }
 
-/// `lines`, cut to `max` unless `full`, with `more` standing for the rest.
-fn cut(lines: Vec<String>, max: usize, full: bool, more: &str) -> Vec<String> {
-    if full || lines.len() <= max {
-        return lines;
-    }
-    let mut l: Vec<String> = lines.into_iter().take(max).collect();
-    l.push(dim(more));
-    l
-}
-
 /// Every memory of a change: its line, then its diff (or a removed memory's text).
-fn print_members(v: &Vault, p: &Pending, full: bool) -> Result<()> {
+fn print_members(v: &Vault, p: &Pending) -> Result<()> {
     let ops = p.ops();
     for (op, line) in ops.iter().zip(describe(v, &ops, true)) {
         let body = match op {
-            Op::Write(m) if !same_content(v, m) => cut(diff_lines(v, m)?, 6, full, "… (v to see all)"),
+            Op::Write(m) if !same_content(v, m) => diff_lines(v, m)?,
             Op::Remove { name, .. } => {
                 let text = p.members.iter().find(|m| &m.name == name).map(|m| m.body.trim().to_string()).unwrap_or_default();
-                cut(text.lines().map(|l| dim(&format!("│ {l}"))).collect(), 3, full, "│ …")
+                text.lines().map(|l| dim(&format!("│ {l}"))).collect()
             }
             _ => vec![],
         };
@@ -459,7 +449,7 @@ fn outcomes(v: &Vault, p: &Pending) -> (String, String) {
 }
 
 /// One pending change, as the user decides it.
-fn print_pending(v: &Vault, p: &Pending, i: usize, total: usize, full: bool) -> Result<()> {
+fn print_pending(v: &Vault, p: &Pending, i: usize, total: usize) -> Result<()> {
     let age = p.members.iter().filter_map(Memory::updated).max().map(hippo::util::ago).unwrap_or_default();
     let by = if p.meta.by.is_empty() { String::new() } else { format!(" · by {}", p.meta.by) };
     eprintln!("{}  {}{}", dim(&format!("{i}/{total}")), bold(&p.meta.title), dim(&format!("{by} · {age}")));
@@ -467,41 +457,9 @@ fn print_pending(v: &Vault, p: &Pending, i: usize, total: usize, full: bool) -> 
         eprintln!("     {}", dim(&format!("why: {}", p.meta.why)));
     }
     eprintln!();
-    print_members(v, p, full)?;
+    print_members(v, p)?;
     let (yes, no) = outcomes(v, p);
     eprintln!("\n  {} {yes}\n  {}  {no}\n", green("yes:"), red("no:"));
-    Ok(())
-}
-
-/// Take, leave, or edit-then-take a change; `None` to ask again.
-fn decide(v: &Vault, p: &Pending, answer: &str) -> Result<Option<String>> {
-    let single = match p.ops().as_slice() {
-        [Op::Write(m)] => Some(m.name.clone()),
-        _ => None,
-    };
-    Ok(Some(match (answer, single) {
-        ("y", _) => v.approve_change(p).map(|_| green("✓ applied"))?,
-        ("n", _) => v.reject_change(p).map(|_| yellow("↩ left as it was"))?,
-        ("e", Some(name)) => {
-            edit_file(&v.memory_path(&name))?;
-            let edited = Pending { members: vec![v.read_memory(&name)?], ..p.clone() };
-            v.approve_change(&edited).map(|_| green("✓ edited and applied"))?
-        }
-        ("e", None) => {
-            eprintln!("  {}", dim("editing is only for a change to one memory"));
-            return Ok(None);
-        }
-        ("s", _) => dim("skipped"),
-        _ => return Ok(None),
-    }))
-}
-
-fn edit_file(path: &std::path::Path) -> Result<()> {
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
-    let ok = std::process::Command::new("sh").arg("-c").arg(format!("{editor} \"$1\"")).arg("sh").arg(path).status()?.success();
-    if !ok {
-        bail!("editor exited with an error");
-    }
     Ok(())
 }
 
@@ -1104,32 +1062,20 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let memories: usize = pending.iter().map(|p| p.members.len()).sum();
             let (n, s) = (pending.len(), if pending.len() == 1 { "" } else { "s" });
             out.say(format!("🦛 {n} change{s} to review ({memories} memor{})\n", if memories == 1 { "y" } else { "ies" }));
-            'review: for (i, p) in pending.iter().enumerate() {
-                let mut full = false;
-                loop {
-                    print_pending(&v, p, i + 1, pending.len(), full)?;
-                    let answer = loop {
-                        match prompt("Apply? [y]es [n]o [v]iew all [e]dit [s]kip [q]uit", "s")?.as_str() {
-                            "q" => break 'review,
-                            "v" => break None,
-                            a => match decide(&v, p, a) {
-                                Ok(None) => continue,
-                                Ok(done) => break done,
-                                Err(e) => break Some(yellow(&format!("{e:#}"))),
-                            },
-                        }
+            for (i, p) in pending.iter().enumerate() {
+                print_pending(&v, p, i + 1, pending.len())?;
+                let done = loop {
+                    let r = match prompt("Apply? [y]es [n]o [s]kip [q]uit", "s")?.as_str() {
+                        "y" => v.approve_change(p).map(|_| green("✓ applied")),
+                        "n" => v.reject_change(p).map(|_| yellow("↩ left as it was")),
+                        "s" => Ok(dim("skipped")),
+                        "q" => break None,
+                        _ => continue,
                     };
-                    match answer {
-                        Some(done) => {
-                            eprintln!("  {done}\n");
-                            break;
-                        }
-                        None => {
-                            full = true;
-                            eprintln!();
-                        }
-                    }
-                }
+                    break Some(r.unwrap_or_else(|e| yellow(&format!("{e:#}"))));
+                };
+                let Some(done) = done else { break };
+                eprintln!("  {done}\n");
             }
             claude_follows(&v, out);
             Ok(())
