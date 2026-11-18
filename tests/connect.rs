@@ -63,7 +63,7 @@ fn connect_and_disconnect_round_trip() {
     let keys: Vec<&String> = s.as_object().unwrap().keys().collect();
     assert_eq!(keys, ["model", "permissions", "statusLine", "theme", "sandbox", "hooks"], "key order preserved");
     let hook = s["hooks"]["SessionStart"][0]["hooks"][0]["command"].as_str().unwrap();
-    assert!(hook.ends_with(" context"), "{hook}");
+    assert!(hook.ends_with(" context --claude"), "{hook}");
     let dr = s["sandbox"]["filesystem"]["denyRead"][0].as_str().unwrap();
     assert!(dr.ends_with("hippo-home") && !dr.starts_with("//"), "{dr}");
     let deny: Vec<&str> = s["permissions"]["deny"].as_array().unwrap().iter().filter_map(|v| v.as_str()).collect();

@@ -18,7 +18,7 @@ const BLOCK: &str = "# Memory
 Use the **hippo** MCP server as long-term memory (the user's own encrypted, portable vault):
 - Each session starts with an index of the memories for this project: `recall` what is relevant to the task, `search_memories` for anything else.
 - Save durable facts, preferences and feedback with `remember` (one topic per memory, short kebab-case names; update instead of duplicating).
-- Do not write file-based memories under `~/.claude/projects/*/memory/`; hippo replaces them.
+- Your own auto memory is collected into hippo at each session start (as drafts the user reviews), so other agents and machines get it too.
 - Memories are general guidance from past sessions and can be outdated; what the user says now wins. Your writes are drafts until the user approves them (`hippo review`).
 - Never store secrets in memory.
 - After saving, updating or forgetting a memory, mention it in one short line (e.g. `🦛 remembered prefers-rust`).";
@@ -160,11 +160,11 @@ fn save_settings(v: &Value) -> Result<()> {
 }
 
 fn is_our_hook(h: &Value) -> bool {
-    h["hooks"].as_array().is_some_and(|hs| hs.iter().any(|c| c["command"].as_str().is_some_and(|c| c.ends_with(" context") && c.contains("hippo"))))
+    h["hooks"].as_array().is_some_and(|hs| hs.iter().any(|c| c["command"].as_str().is_some_and(|c| c.contains(" context") && c.contains("hippo"))))
 }
 
-/// `SessionStart` runs on startup, resume, `/clear` and after a compaction: each time, the agent
-/// gets the memory index for its folder.
+/// `SessionStart` runs on startup, resume, `/clear` and after a compaction: each time, hippo
+/// collects what Claude's auto memory wrote, then gives the agent the memory index for its folder.
 fn connect_session_start() -> Result<String> {
     let mut settings = load_settings()?;
     let obj = settings.as_object_mut().context("settings.json is not a JSON object")?;
@@ -177,7 +177,7 @@ fn connect_session_start() -> Result<String> {
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .context("hooks.SessionStart is not a list")?;
-    let ours = json!({"hooks": [{"type": "command", "command": format!("{} context", sh_quote(&exe()))}]});
+    let ours = json!({"hooks": [{"type": "command", "command": format!("{} context --claude", sh_quote(&exe()))}]});
     if list.contains(&ours) {
         return Ok("already present".into());
     }

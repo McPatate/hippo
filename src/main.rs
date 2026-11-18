@@ -148,7 +148,11 @@ enum Cmd {
         pixel: bool,
     },
     /// Memory index for an agent's new or compacted session (Claude Code `SessionStart` hook)
-    Context,
+    Context {
+        /// First collect what Claude Code's auto memory wrote since (as drafts to review)
+        #[arg(long)]
+        claude: bool,
+    },
     /// Connect hippo to an agent harness (MCP + memory instructions + optional status line)
     Connect {
         #[command(subcommand)]
@@ -692,7 +696,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Context => {
+        Cmd::Context { claude } => {
             // Hook input on stdin: the session's working folder. Never fail a session start.
             let mut input = Vec::new();
             if !std::io::stdin().is_terminal() {
@@ -703,6 +707,15 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 .and_then(|v| v["cwd"].as_str().map(PathBuf::from))
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
             let Ok(v) = vault_path(cli).and_then(|p| Vault::open(&p)) else { return Ok(()) };
+            let from = hippo::import::default_claude_dir();
+            if *claude && from.is_dir() {
+                use hippo::import::{Status, count};
+                match hippo::import::plan_and_import_claude(&v, &from, false, Some("claude-code")) {
+                    Ok((plans, Some(_))) => hippo::log::record(&v.root, "import", json!({"source": "claude-code", "new": count(&plans, Status::New), "updated": count(&plans, Status::Updated), "secret": count(&plans, Status::Secret)})),
+                    Ok(_) => {}
+                    Err(e) => eprintln!("hippo: could not collect Claude Code's memories: {e:#}"),
+                }
+            }
             let scope = hippo::project::Scope::here(&v, &cwd);
             let idx = hippo::context::index(&v.list().unwrap_or_default(), &scope, hippo::context::BUDGET);
             hippo::log::record(&v.root, "context", json!({"count": idx.lines().count().saturating_sub(1), "shared": "descriptions"}));
