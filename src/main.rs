@@ -385,6 +385,32 @@ fn read_body(agent: bool, message: Option<String>, existing: Option<&str>) -> Re
     Ok(body)
 }
 
+/// The review diff in `less`, the decision fixed at the bottom: `y` → `Some(true)`, `n` →
+/// `Some(false)`, `q` → `None` (later). `Err` when `less` can't, so the caller asks plainly.
+fn page_review(v: &Vault, diff: &str, n: usize) -> Result<Option<bool>> {
+    let dir = v.meta_dir().join("review-view");
+    std::fs::create_dir_all(&dir)?;
+    let (keys, text) = (dir.join("keys"), dir.join("changes.diff"));
+    std::fs::write(&keys, "#command\ny quit y\nn quit n\n")?;
+    std::fs::write(&text, diff)?;
+    let s = if n == 1 { "" } else { "s" };
+    // `?`, `:`, `.` and `%` mean something in a less prompt.
+    let prompt = format!(" Apply {n} change{s}?  y apply all · n undo all · q later ").replace('?', "\\?").replace(':', "\\:").replace('.', "\\.");
+    let status = std::process::Command::new("less")
+        .env("LESSCHARSET", "utf-8")
+        .arg(format!("--lesskey-src={}", keys.display()))
+        .args(["-R", "--mouse", "--use-color", "-DPky", "-~", &format!("-Ps{prompt}")])
+        .arg(&text)
+        .status();
+    let _ = std::fs::remove_dir_all(&dir);
+    match status?.code() {
+        Some(121) => Ok(Some(true)),
+        Some(110) => Ok(Some(false)),
+        Some(0) => Ok(None),
+        c => bail!("less exited with {c:?}"),
+    }
+}
+
 fn status_json(v: &Vault, s: &backup::Status) -> Value {
     json!({
         "vault": v.root,
@@ -951,7 +977,8 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let mut diff = String::new();
             for p in &pending {
                 let why = if p.meta.why.is_empty() { String::new() } else { format!(" · {}", p.meta.why) };
-                diff += &bold(&format!("# {} · by {}{why}\n", p.meta.title, p.meta.by));
+                let head = format!("# {} · by {}{why}\n", p.meta.title, p.meta.by);
+                diff += &if human && ui::color() { bold(&head) } else { head };
                 diff += &v.diff_change(p, human && ui::color())?;
                 diff += "\n";
             }
@@ -981,14 +1008,31 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
                 out.say(format!("{} nothing to review", green("✓")));
                 return Ok(());
             }
-            print!("{diff}");
             let (n, s) = (pending.len(), if pending.len() == 1 { "" } else { "s" });
-            if prompt(&format!("Apply all {n} change{s}?"), "y/N")?.eq_ignore_ascii_case("y") {
-                let failed: Vec<String> = pending.iter().filter_map(|p| v.approve_change(p).err().map(|e| format!("{}: {e:#}", p.meta.title))).collect();
-                out.say(format!("{} applied {}", green("✓"), n - failed.len()));
-                for f in failed {
-                    out.say(yellow(&format!("  not applied: {f}")));
+            let paged = if std::io::stdout().is_terminal() { page_review(&v, &diff, n).ok() } else { None };
+            let choice = match paged {
+                Some(c) => c,
+                None => {
+                    print!("{diff}");
+                    prompt(&format!("Apply all {n} change{s}?"), "y/N")?.eq_ignore_ascii_case("y").then_some(true)
                 }
+            };
+            let (verb, failed): (&str, Vec<String>) = match choice {
+                None => {
+                    out.say(dim("left for later"));
+                    return Ok(());
+                }
+                Some(yes) => (
+                    if yes { "applied" } else { "undone" },
+                    pending
+                        .iter()
+                        .filter_map(|p| if yes { v.approve_change(p) } else { v.reject_change(p) }.err().map(|e| format!("{}: {e:#}", p.meta.title)))
+                        .collect(),
+                ),
+            };
+            out.say(format!("{} {verb} {}", green("✓"), n - failed.len()));
+            for f in failed {
+                out.say(yellow(&format!("  not {verb}: {f}")));
             }
             claude_follows(&v, out);
             Ok(())
