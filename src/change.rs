@@ -309,10 +309,16 @@ impl Vault {
         let dir = self.meta_dir().join("review");
         let _ = std::fs::remove_dir_all(&dir);
         for m in &p.members {
-            if let Some(t) = self.approved_version(&m.name)? {
+            // A removal shows what goes, even a draft that was never approved.
+            let before = match self.approved_version(&m.name)? {
+                Some(t) => Some(Memory::parse(&m.name, &t)),
+                None if m.status() == Some("forget") => Some(m.clone()),
+                None => None,
+            };
+            if let Some(b) = before {
                 let path = dir.join("a/memories").join(format!("{}.md", m.name));
                 std::fs::create_dir_all(path.parent().unwrap())?;
-                std::fs::write(path, Memory::parse(&m.name, &t).content().render())?;
+                std::fs::write(path, b.content().render())?;
             }
             if m.status() != Some("forget") {
                 let path = dir.join("b/memories").join(format!("{}.md", m.name));
