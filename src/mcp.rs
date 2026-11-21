@@ -42,6 +42,8 @@ were written by an agent and not yet reviewed by the user. What the user says no
 To change several memories at once with the user's agreement (merge, rename, rescope, retire), use `propose_changes`: \
 hippo asks the user to confirm in a dialog.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
+- Work in flight the next session should pick up (state, next steps): `handoff` with a short topic; it replaces the last handoff \
+on that topic. Don't `remember` work state, and no dates in names.\n\
 - Facts that only matter in one project: `remember` with `visibility: \"project\"` (the folder this session started in) \
 or `\"project:<key>\"` when they belong to another project than that folder.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\
@@ -92,6 +94,18 @@ pub struct RememberArgs {
     pub tags: Option<Vec<String>>,
     /// `all` (default), `private` (never returned to agents), `project` (only in the project this session started in), or `project:<key>` (another project).
     pub visibility: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct HandoffArgs {
+    /// Short topic, e.g. `0.9 release` (no dates): one handoff per topic, each replacing the last.
+    pub topic: String,
+    /// Where the work stands and what comes next (Markdown).
+    pub content: String,
+    /// One line for the session-start index (default: the topic).
+    pub description: Option<String>,
+    /// Project key, only when this folder belongs to several projects.
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -417,6 +431,9 @@ impl HippoServer {
     async fn remember(&self, Parameters(a): Parameters<RememberArgs>) -> Result<CallToolResult, McpError> {
         let vault = self.vault()?;
         let kind = a.kind.unwrap_or_else(|| "note".into());
+        if kind == "handoff" {
+            return Err(McpError::invalid_params("work state for the next session: use the `handoff` tool", None));
+        }
         if !KINDS.contains(&kind.as_str()) {
             return Err(McpError::invalid_params(format!("type must be one of {KINDS:?}"), None));
         }
@@ -475,6 +492,56 @@ impl HippoServer {
                 )
             }
             None => format!("already knew `{name}` (unchanged)"),
+        };
+        self.reply(&vault, receipt, String::new())
+    }
+
+    #[tool(
+        title = "🦛 Handoff",
+        description = "Save work in flight for the next session in this project (where it stands, next steps) under a short topic. \
+                       It replaces the last handoff on that topic and needs no review.",
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn handoff(&self, Parameters(a): Parameters<HandoffArgs>) -> Result<CallToolResult, McpError> {
+        let vault = self.vault()?;
+        if a.topic.trim().is_empty() {
+            return Err(McpError::invalid_params("topic is empty", None));
+        }
+        let keys = self.scope.read().unwrap().keys.clone();
+        let key = match a.project.as_deref().map(crate::memory::slugify) {
+            Some(k) if keys.contains(&k) => k,
+            Some(k) if keys.is_empty() => return Err(McpError::invalid_params(format!("no project `{k}` here: this folder has none yet, leave `project` out"), None)),
+            Some(k) => return Err(McpError::invalid_params(format!("no project `{k}` here; this folder's: {}", keys.join(", ")), None)),
+            None if keys.len() > 1 => {
+                return Err(McpError::invalid_params(format!("this folder is in several projects ({}): say which with `project`", keys.join(", ")), None));
+            }
+            None => self.project_key(&vault, None).map_err(err)?,
+        };
+        let name = crate::memory::slugify(&format!("{key}-handoff-{}", a.topic));
+        let existing = vault.read_memory(&name).ok();
+        if existing.as_ref().is_some_and(|m| !self.reviewable(m)) {
+            return Err(McpError::invalid_params(format!("the name `{name}` is taken outside this project; pick another topic"), None));
+        }
+        let mut m = Memory {
+            name: name.clone(),
+            description: a.description.unwrap_or_else(|| a.topic.trim().into()),
+            kind: "handoff".into(),
+            body: a.content,
+            ..Default::default()
+        };
+        m.extra.insert("visibility".into(), format!("project:{key}"));
+        reject_secrets(&vault, &m.render())?;
+        let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
+        let commit = vault.handoff(&m, &agent).map_err(err)?;
+        self.wrote([&name]);
+        let receipt = match &commit {
+            Some(c) => {
+                self.log(&vault, "handoff", serde_json::json!({"name": name, "new": existing.is_none()}));
+                self.schedule_backup();
+                let replaces = if existing.is_some() { " · replaces the last one on this topic" } else { "" };
+                format!("handoff `{name}` saved · only in project {key}{replaces} · {} · {}", &c[..8], self.backup_note(&vault))
+            }
+            None => format!("handoff `{name}` unchanged"),
         };
         self.reply(&vault, receipt, String::new())
     }

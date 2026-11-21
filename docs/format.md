@@ -21,7 +21,7 @@ Memory file: UTF-8 Markdown with optional frontmatter. Unknown keys must be pres
 ---
 name: prefers-rust          # slug, = file stem
 description: one line
-type: user | feedback | project | reference | note
+type: user | feedback | project | reference | note | handoff
 tags: a, b
 visibility: all | private | project:<key>   # who may read it (default all)
 by: user | <agent>          # who wrote this version
@@ -39,6 +39,8 @@ A project is a key in `projects.toml`, not a folder: an agent is in project `<ke
 roots = ["9f1c…"]
 paths = ["/Users/me/work/safetensors"]
 ```
+
+A `handoff` is work in flight for the next session (state, next steps): named `<key>-handoff-<topic>`, scoped to project `<key>`, replaced by the next handoff on that topic, and never a draft.
 
 Agent writes are drafts until the user approves them (`hippo review`). Rejecting restores the last version without `status`; an agent's `forget` hides the memory from agents until the user approves the removal. A change (a merge, rename, rescope…) groups the files it touches: the user takes or leaves it as a whole, and approving drops the review fields.
 

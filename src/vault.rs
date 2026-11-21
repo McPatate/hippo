@@ -232,13 +232,26 @@ impl Vault {
 
     /// Write + commit, stamped with who wrote it. An agent's write is a draft until approved.
     pub fn remember_by(&self, m: &Memory, agent: Option<&str>) -> Result<Option<String>> {
+        self.write_stamped(m, agent, false, "remember")
+    }
+
+    /// Write + commit an agent's handoff: stamped with who wrote it, but never a draft (it is
+    /// working state, replaced rather than reviewed).
+    pub fn handoff(&self, m: &Memory, agent: &str) -> Result<Option<String>> {
+        self.write_stamped(m, Some(agent), true, "handoff")
+    }
+
+    fn write_stamped(&self, m: &Memory, agent: Option<&str>, settled: bool, verb: &str) -> Result<Option<String>> {
         let _lock = self.lock()?;
         // Compare in the form it is stored in (slug name, normalized body).
         let mut m = Memory::parse("", &m.render());
         m.name = slugify(&m.name);
         m.stamp(self.read_memory(&m.name).ok().as_ref(), agent);
+        if settled {
+            m.settle();
+        }
         let rel = self.rel(&self.write_memory(&m)?);
-        self.commit_one_locked(&rel, &format!("remember: {rel}"))
+        self.commit_one_locked(&rel, &format!("{verb}: {rel}"))
     }
 
     pub fn forget(&self, name: &str) -> Result<bool> {

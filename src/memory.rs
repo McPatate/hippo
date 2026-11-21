@@ -16,7 +16,7 @@
 
 use std::collections::BTreeMap;
 
-pub const KINDS: &[&str] = &["user", "feedback", "project", "reference", "note"];
+pub const KINDS: &[&str] = &["user", "feedback", "project", "reference", "note", "handoff"];
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Memory {

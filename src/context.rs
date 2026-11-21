@@ -9,14 +9,18 @@ use crate::project::Scope;
 /// themselves can be any size.
 pub const BUDGET: usize = 9500;
 
-/// This project's memories first, then how the user wants agents to work, then the rest;
-/// newest first within each group. Lines are cut once `budget` is reached.
+/// Handoffs not picked up for this long are marked stale.
+const STALE_DAYS: i64 = 7;
+
+/// Handoffs first (work to pick up), then this project's memories, then how the user wants
+/// agents to work, then the rest; newest first within each group. Lines are cut once `budget` is reached.
 pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
     let mut seen: Vec<&Memory> = memories.iter().filter(|m| m.status() != Some("forget") && m.visible_in(scope)).collect();
     let rank = |m: &Memory| match (m.visibility(), m.kind.as_str()) {
-        (Visibility::Project(_), _) => 0,
-        (_, "feedback" | "user") => 1,
-        _ => 2,
+        (_, "handoff") => 0,
+        (Visibility::Project(_), _) => 1,
+        (_, "feedback" | "user") => 2,
+        _ => 3,
     };
     seen.sort_by(|a, b| rank(a).cmp(&rank(b)).then(b.updated().cmp(&a.updated())).then(a.name.cmp(&b.name)));
     if seen.is_empty() {
@@ -30,7 +34,7 @@ pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
         scope.keys.first().map(|k| format!(" in project `{k}`")).unwrap_or_default()
     );
     for (i, m) in seen.iter().enumerate() {
-        let line = format!("- {} [{}]{} {}\n", m.name, m.kind, if m.needs_review() { " (unconfirmed)" } else { "" }, m.description);
+        let line = format!("- {} [{}]{} {}\n", m.name, label(m), if m.needs_review() { " (unconfirmed)" } else { "" }, m.description);
         if out.len() + line.len() > budget {
             out += &format!("- … {} more: `list_memories` or `search_memories`\n", seen.len() - i);
             break;
@@ -38,6 +42,19 @@ pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
         out += &line;
     }
     out
+}
+
+/// The type, and for a handoff its age: `handoff, 3h ago` (`, stale` once it sat for a week).
+fn label(m: &Memory) -> String {
+    let Some(t) = m.updated().filter(|_| m.kind == "handoff") else { return m.kind.clone() };
+    let age = crate::util::now() - t;
+    let ago = match (age.num_days(), age.num_hours(), age.num_minutes()) {
+        (d, _, _) if d > 0 => format!("{d}d ago"),
+        (_, h, _) if h > 0 => format!("{h}h ago"),
+        (_, _, min) if min > 0 => format!("{min}min ago"),
+        _ => "just now".into(),
+    };
+    format!("handoff, {ago}{}", if age.num_days() >= STALE_DAYS { ", stale" } else { "" })
 }
 
 /// Has the index for this project changed since the last session start? Remembers it locally
@@ -86,6 +103,23 @@ mod tests {
         let names: Vec<&str> = idx.lines().skip(1).map(|l| l[2..].split(' ').next().unwrap()).collect();
         assert_eq!(names, ["st-plan", "style", "misc"]);
         assert!(idx.starts_with("🦛 hippo: 3 memories"));
+    }
+
+    #[test]
+    fn handoffs_first_with_their_age() {
+        let scope = Scope { dir: "/w/st".into(), keys: vec!["st".into()] };
+        let ago = |days: i64| (crate::util::now() - chrono::TimeDelta::days(days)).format("%Y-%m-%dT%H:%M:%SZ").to_string();
+        let mut fresh = mem("st-handoff-release", "handoff", Some("project:st"));
+        fresh.extra.insert("updated".into(), (crate::util::now() - chrono::TimeDelta::hours(3)).format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        let mut old = mem("st-handoff-ci", "handoff", Some("project:st"));
+        old.extra.insert("updated".into(), ago(9));
+        let mut plan = mem("st-plan", "project", Some("project:st"));
+        plan.extra.insert("updated".into(), ago(0));
+        let idx = index(&[mem("style", "feedback", None), plan, old, fresh], &scope, BUDGET);
+        let lines: Vec<&str> = idx.lines().skip(1).collect();
+        assert_eq!(lines[0], "- st-handoff-release [handoff, 3h ago] about st-handoff-release");
+        assert_eq!(lines[1], "- st-handoff-ci [handoff, 9d ago, stale] about st-handoff-ci");
+        assert!(lines[2].starts_with("- st-plan [project] ") && lines[3].starts_with("- style [feedback] "), "{idx}");
     }
 
     #[test]

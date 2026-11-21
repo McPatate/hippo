@@ -241,3 +241,50 @@ fn rules_saved_elsewhere_reach_a_running_session_once() {
     let (_, out) = c.call("list_memories", json!({}), "accept");
     assert!(!out.contains("new since"), "{out}");
 }
+
+#[test]
+fn handoffs_replace_the_last_one_on_their_topic_without_review() {
+    let (tmp, v) = setup();
+    let mut c = Client::start(&v, tmp.path(), false);
+    let (_, out) = c.call("handoff", json!({"topic": "0.9 release", "content": "Tagging next."}), "accept");
+    let key = hippo::project::Registry::load(&v.root).unwrap().projects.into_keys().next().unwrap();
+    let name = format!("{key}-handoff-0-9-release");
+    assert!(out.starts_with(&format!("🦛 hippo handoff `{name}` saved · only in project {key} · ")) && !out.contains("replaces"), "{out}");
+    let m = v.read_memory(&name).unwrap();
+    assert_eq!((m.kind.as_str(), m.description.as_str(), m.status()), ("handoff", "0.9 release", None));
+    assert_eq!(m.extra.get("visibility"), Some(&format!("project:{key}")));
+    assert_eq!(m.extra.get("by").map(String::as_str), Some("test"));
+
+    let (_, out) = c.call("handoff", json!({"topic": "0.9 release", "content": "Tagged; publish wheels."}), "accept");
+    assert!(out.contains("replaces the last one on this topic"), "{out}");
+    assert_eq!(v.read_memory(&name).unwrap().body.trim(), "Tagged; publish wheels.");
+    let log = std::fs::read_to_string(v.root.join(".hippo/log.jsonl")).unwrap();
+    assert!(log.lines().rfind(|l| l.contains("\"action\":\"handoff\"")).unwrap().contains("\"new\":false"), "{log}");
+    let (_, out) = c.call("pending_changes", json!({}), "accept");
+    assert!(out.starts_with("🦛 hippo 0 change(s) waiting"), "{out}");
+
+    let (_, out) = c.call("remember", json!({"name": "release-state", "content": "Tagging.", "type": "handoff"}), "accept");
+    assert!(out.contains("use the `handoff` tool") && v.read_memory("release-state").is_err(), "{out}");
+    let (_, out) = c.call("handoff", json!({"topic": "x", "content": "y", "project": "nope"}), "accept");
+    assert!(out.contains(&format!("no project `nope` here; this folder's: {key}")), "{out}");
+}
+
+#[test]
+fn a_folder_in_several_projects_names_the_handoff_project() {
+    let (tmp, v) = setup();
+    let dir = tmp.path().canonicalize().unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&dir).args(args).env("GIT_CONFIG_GLOBAL", "/dev/null").output().unwrap();
+        assert!(out.status.success());
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    };
+    git(&["init", "-q"]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "root"]);
+    let id = hippo::project::Ident { dir: dir.clone(), toplevel: Some(dir.clone()), roots: vec![git(&["rev-parse", "HEAD"])] };
+    v.update_registry("link", |r| r.learn("engine", &id) | r.learn("bindings", &id)).unwrap();
+    let mut c = Client::start(&v, tmp.path(), false);
+    let (_, out) = c.call("handoff", json!({"topic": "ci", "content": "Fixing the macOS job."}), "accept");
+    assert!(out.contains("this folder is in several projects (bindings, engine): say which with `project`"), "{out}");
+    let (_, out) = c.call("handoff", json!({"topic": "ci", "content": "Fixing the macOS job.", "project": "engine"}), "accept");
+    assert!(out.contains("handoff `engine-handoff-ci` saved · only in project engine"), "{out}");
+}
