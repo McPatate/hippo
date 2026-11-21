@@ -17,15 +17,31 @@ dialog hippo shows itself (you never see or answer it).
 
 Call `pending_changes`. These are changes agents made earlier that the user hasn't decided yet
 (drafts, removals, renames). If there are any, go through them with the user **before** proposing
-anything new:
+anything new.
 
-- One `AskUserQuestion` question per change (up to 4 per call). Put hippo's lines for the change in
-  the question, and the memory's content (or the diff, or the content of a memory being deleted)
-  in the option `preview`, so the user sees what they decide on.
-- Options: `Approve`, `Reject` (say what each does in its description, e.g. "deletes atomic-prs;
-  its content is in pr-style" / "keeps atomic-prs as it is"), and `Decide later`.
-- Then call `decide_changes` once with everything the user approved or rejected. hippo shows one
-  dialog to confirm. If the user declines it, ask what they want to change.
+A draft is a candidate, not a memory to keep as it is: judge it with the same eye as step 2.
+
+- **Lasting and well placed** (a rule, a preference, a fact that will still hold in a month):
+  recommend `Approve`.
+- **Work state** (handoffs, status, todos, run results, goal shifts; dated names are a tell):
+  recommend folding it. Pull out what will still matter (decisions, constraints, facts about the
+  setup) into the persistent memory where it belongs, existing or new, and reject the note. If
+  nothing lasts, recommend `Reject`.
+- **Overlapping** another draft or an existing memory: recommend merging them.
+
+Several notes on the same topic make one question ("fold the 3 safetensors 0.9 handoffs into
+safetensors-release-process").
+
+- One `AskUserQuestion` question per change or group (up to 4 per call). Put hippo's lines for the
+  change in the question. Put the content in the option `preview`: the memory, the diff, the
+  content of a memory being deleted, or for a fold the resulting memory.
+- Options: the recommended one first with "(Recommended)", then whichever of `Fold into <memory>`,
+  `Approve as is`, `Reject` and `Decide later` apply. Say what each does in its description, e.g.
+  "deletes atomic-prs; its content is in pr-style" / "keeps atomic-prs as it is".
+- Then call `propose_changes` once with the folds and merges (the writes into persistent
+  memories), then `decide_changes` once with every approval and rejection, rejected folded notes
+  included. hippo shows a dialog for each. Folds go first so nothing is lost if the user declines
+  one; if they do, ask what they want to change.
 
 ### 2. Tidy the memory
 
