@@ -44,6 +44,8 @@ hippo asks the user to confirm in a dialog.\n\
 - Never store secrets (passwords, API keys, tokens) in memory.\n\
 - Work in flight the next session should pick up (state, next steps): `handoff` with a short topic; it replaces the last handoff \
 on that topic. Don't `remember` work state, and no dates in names.\n\
+- Write what stays true. Avoid facts that expire by nature (\"on Tuesday we did X\", \"the PR is in review\"): \
+when time matters, give an absolute date; the current state of work goes in a `handoff`.\n\
 - Facts that only matter in one project: `remember` with `visibility: \"project\"` (the folder this session started in) \
 or `\"project:<key>\"` when they belong to another project than that folder.\n\
 - After saving, updating or forgetting a memory, say so in one short line in your reply, e.g. `🦛 remembered prefers-rust`, so the user can see what changed.\n\

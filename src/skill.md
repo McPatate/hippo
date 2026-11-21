@@ -26,6 +26,8 @@ Read everything before the first question: pending drafts and existing memories 
 4. Classify every pending change and every memory worth touching:
    - **lasting and well placed** (a rule, a preference, a fact that will still hold in a month)
      → approve as is
+   - **perishable wording** in a lasting memory ("on Tuesday we did X", "currently", "the PR is in
+     review") → rewrite it to what stays true, with absolute dates where time matters
    - **work state** (handoff notes, status, todos, run results, goal shifts; dated names are a tell)
      → fold: pull what will still matter (decisions, constraints, facts about the setup) into the
      persistent memory where it belongs, existing or new, and drop the note. Nothing lasting → drop.
