@@ -734,7 +734,9 @@ impl HippoServer {
         m.visible_in(&self.scope.read().unwrap())
     }
 
-    fn to_op(&self, vault: &Vault, op: OpArg) -> Result<crate::change::Op, McpError> {
+    /// `renamed`: new name → old name for the renames earlier in this change, so later ops can
+    /// use the new name (and a write keeps the memory's type, scope and links).
+    fn to_op(&self, vault: &Vault, op: OpArg, renamed: &mut std::collections::BTreeMap<String, String>) -> Result<crate::change::Op, McpError> {
         use crate::change::Op;
         let visibility = |v: &str| -> Result<String, McpError> {
             match v.trim() {
@@ -752,10 +754,16 @@ impl HippoServer {
                 v => Err(McpError::invalid_params(format!("visibility `{v}`: use all, private, project or project:<key>"), None)),
             }
         };
-        let seen = |n: &str| -> Result<Memory, McpError> { self.read_visible(vault, n) };
+        let current = |n: &str| renamed.get(&crate::memory::slugify(n)).map(|o| (n.to_string(), o.clone()));
+        let seen = |n: &str| -> Result<Memory, McpError> {
+            match current(n) {
+                Some((new, old)) => Ok(Memory { name: crate::memory::slugify(&new), ..self.read_visible(vault, &old)? }),
+                None => self.read_visible(vault, n),
+            }
+        };
         Ok(match op {
             OpArg::Write { name, content, description, kind, tags, visibility: vis } => {
-                let existing = vault.read_memory(&name).ok();
+                let existing = vault.read_memory(&name).ok().or_else(|| current(&name).and_then(|(_, old)| vault.read_memory(&old).ok()));
                 if existing.as_ref().is_some_and(|m| !self.reviewable(m)) {
                     return Err(McpError::invalid_params(format!("the name `{name}` is taken outside this project; pick another"), None));
                 }
@@ -779,7 +787,11 @@ impl HippoServer {
                 reject_secrets(vault, &m.render())?;
                 Op::Write(m)
             }
-            OpArg::Rename { from, to } => Op::Rename { from: seen(&from)?.name, to },
+            OpArg::Rename { from, to } => {
+                let from = seen(&from)?.name;
+                renamed.insert(crate::memory::slugify(&to), from.clone());
+                Op::Rename { from, to }
+            }
             OpArg::Scope { name, visibility: v } => Op::Scope { name: seen(&name)?.name, visibility: visibility(&v)? },
             OpArg::Remove { name, into } => Op::Remove { name: seen(&name)?.name, into },
         })
@@ -802,7 +814,8 @@ impl HippoServer {
         let vault = self.vault()?;
         let mut changes = vec![];
         for c in a.changes {
-            let ops = c.ops.into_iter().map(|o| self.to_op(&vault, o)).collect::<Result<Vec<_>, _>>()?;
+            let mut renamed = Default::default();
+            let ops = c.ops.into_iter().map(|o| self.to_op(&vault, o, &mut renamed)).collect::<Result<Vec<_>, _>>()?;
             changes.push(crate::change::Change { title: c.title, why: c.why.unwrap_or_default(), ops });
         }
         if changes.is_empty() {

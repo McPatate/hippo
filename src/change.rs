@@ -99,32 +99,46 @@ pub fn describe(vault: &Vault, ops: &[Op], pending: bool) -> Vec<String> {
         Visibility::Private => "private".to_string(),
         Visibility::Project(p) => p,
     };
-    ops.iter()
-        .map(|op| match op {
-            Op::Write(m) => match before(&m.name) {
+    let what = |old: &Memory, new: &Memory| {
+        let mut what = vec![];
+        if old.body.trim() != new.body.trim() || old.description != new.description || old.kind != new.kind {
+            what.push("content".to_string());
+        }
+        if old.visibility() != new.visibility() {
+            what.push(format!("seen {} → {}", vis(old), vis(new)));
+        }
+        if what.is_empty() { "unchanged".into() } else { what.join(", ") }
+    };
+    // New name → old name, for ops after a rename in the same proposal.
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+    let mut lines = vec![];
+    for (i, op) in ops.iter().enumerate() {
+        let was = |n: &str| before(n).or_else(|| renamed.get(&slugify(n)).and_then(|o| before(o)));
+        lines.push(match op {
+            Op::Write(m) => match was(&m.name) {
                 None => format!("+ new {} [{}], seen {}", slugify(&m.name), m.kind, vis(m)),
-                Some(old) => {
-                    let mut what = vec![];
-                    if old.body.trim() != m.body.trim() || old.description != m.description || old.kind != m.kind {
-                        what.push("content".to_string());
-                    }
-                    if old.visibility() != m.visibility() {
-                        what.push(format!("seen {} → {}", vis(&old), vis(m)));
-                    }
-                    format!("✎ edit {} ({})", old.name, if what.is_empty() { "unchanged".into() } else { what.join(", ") })
-                }
+                Some(old) => format!("✎ edit {} ({})", slugify(&m.name), what(&old, m)),
             },
-            Op::Rename { from, to } => format!("→ rename {} → {} (same content)", slugify(from), slugify(to)),
+            Op::Rename { from, to } => {
+                let (from, to) = (slugify(from), slugify(to));
+                let edits = match pending {
+                    true => before(&from).zip(vault.read_memory(&to).ok()).map(|(o, n)| what(&o, &n)).filter(|w| w != "unchanged"),
+                    false => ops[i + 1..].iter().any(|o| matches!(o, Op::Write(m) if slugify(&m.name) == to)).then(|| "edited below".into()),
+                };
+                renamed.insert(to.clone(), from.clone());
+                format!("→ rename {from} → {to} ({})", edits.unwrap_or_else(|| "same content".into()))
+            }
             Op::Scope { name, visibility } => {
-                let old = vault.read_memory(name).map(|m| vis(&m)).unwrap_or_default();
+                let old = was(name).map(|m| vis(&m)).unwrap_or_default();
                 let mut m = Memory::default();
                 set_visibility(&mut m, visibility);
                 format!("◎ {}: seen {} → {}", slugify(name), old, vis(&m))
             }
             Op::Remove { name, into: Some(into) } => format!("✗ delete {} (its content is in {})", slugify(name), slugify(into)),
             Op::Remove { name, into: None } => format!("✗ delete {}", slugify(name)),
-        })
-        .collect()
+        });
+    }
+    lines
 }
 
 /// `describe` lines counted by kind, e.g. "10 renames · 9 deletions (kept in history)": short
@@ -153,43 +167,70 @@ pub fn tally(lines: &[String]) -> String {
 }
 
 impl Vault {
+    /// Can `changes` apply as they are? Ops on one memory apply in order within its change; a
+    /// memory is in one change at most (it carries one `change:` id).
+    pub fn check_changes(&self, changes: &[Change]) -> Result<()> {
+        // After the ops so far: true = exists, false = renamed away or removed.
+        let mut now: BTreeMap<String, bool> = BTreeMap::new();
+        let mut owner: BTreeMap<String, usize> = BTreeMap::new();
+        for (i, c) in changes.iter().enumerate() {
+            for op in &c.ops {
+                let names: Vec<&String> = match op {
+                    Op::Write(m) => vec![&m.name],
+                    Op::Rename { from, to } => vec![from, to],
+                    Op::Scope { name, .. } | Op::Remove { name, .. } => vec![name],
+                };
+                for n in names {
+                    if *owner.entry(slugify(n)).or_insert(i) != i {
+                        bail!("`{n}` is in two changes: put every op on one memory in the same change");
+                    }
+                    if now.get(&slugify(n)) == Some(&false) {
+                        bail!("`{n}` was renamed or removed earlier in this change: no more ops on it");
+                    }
+                }
+                let exists = |now: &BTreeMap<String, bool>, n: &str| now.get(&slugify(n)).copied().unwrap_or_else(|| self.memory_path(n).exists());
+                // Renames and removals start from the memory as it was: a name new in this change gets its final name directly.
+                let existing = |n: &str| -> Result<()> {
+                    match (self.memory_path(n).exists(), exists(&now, n)) {
+                        (true, _) => Ok(()),
+                        (false, true) => bail!("`{n}` is new in this change: write it under its final name instead"),
+                        (false, false) => bail!("no memory named `{n}`"),
+                    }
+                };
+                match op {
+                    Op::Write(m) => drop(now.insert(slugify(&m.name), true)),
+                    Op::Rename { from, to } => {
+                        existing(from)?;
+                        if exists(&now, to) {
+                            bail!("cannot rename {from} to {to}: {to} already exists (merge them instead)");
+                        }
+                        now.insert(slugify(from), false);
+                        now.insert(slugify(to), true);
+                    }
+                    Op::Scope { name, visibility } => {
+                        check_visibility(visibility)?;
+                        if !exists(&now, name) {
+                            bail!("no memory named `{name}`");
+                        }
+                    }
+                    Op::Remove { name, into } => {
+                        existing(name)?;
+                        if let Some(i) = into.as_deref().filter(|i| !exists(&now, i)) {
+                            bail!("no memory named `{i}` to hold the content");
+                        }
+                        now.insert(slugify(name), false);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Apply `changes` in one commit: as drafts for the user to review, or `approved`, when the
     /// user said yes in a dialog hippo showed them. Checks every change before touching a file.
     pub fn apply_changes(&self, changes: &[Change], agent: &str, approved: bool) -> Result<Option<String>> {
         let _lock = self.lock()?;
-        let exists = |n: &str| self.memory_path(n).exists();
-        let mut touched = BTreeSet::new();
-        let mut written = BTreeSet::new();
-        for op in changes.iter().flat_map(|c| &c.ops) {
-            let names = match op {
-                Op::Write(m) => {
-                    written.insert(slugify(&m.name));
-                    vec![m.name.clone()]
-                }
-                Op::Rename { from, to } => {
-                    if exists(to) {
-                        bail!("cannot rename {from} to {to}: {to} already exists (merge them instead)");
-                    }
-                    written.insert(slugify(to));
-                    vec![from.clone(), to.clone()]
-                }
-                Op::Scope { name, visibility } => {
-                    check_visibility(visibility)?;
-                    vec![name.clone()]
-                }
-                Op::Remove { name, .. } => vec![name.clone()],
-            };
-            for n in names {
-                if !touched.insert(slugify(&n)) {
-                    bail!("{n} appears in more than one change; each memory can only be changed once at a time");
-                }
-            }
-            match op {
-                Op::Rename { from: n, .. } | Op::Scope { name: n, .. } | Op::Remove { name: n, .. } if !exists(n) => bail!("no memory named `{n}`"),
-                Op::Remove { into: Some(i), .. } if !exists(i) && !written.contains(&slugify(i)) => bail!("no memory named `{i}` to hold the content"),
-                _ => {}
-            }
-        }
+        self.check_changes(changes)?;
 
         let mut ledger = load(&self.root)?;
         let mut paths = vec![];
@@ -206,6 +247,18 @@ impl Vault {
             Ok(())
         };
         let mut gone = vec![];
+        // Memories as they were before this batch: what a removal or a rename takes away.
+        let mut before: BTreeMap<String, Memory> = BTreeMap::new();
+        for n in changes.iter().flat_map(|c| &c.ops).filter_map(|op| match op {
+            Op::Rename { from: n, .. } | Op::Remove { name: n, .. } => Some(n),
+            _ => None,
+        }) {
+            before.insert(slugify(n), self.read_memory(n)?);
+        }
+        // A later op on a renamed memory keeps it a rename while it waits for review.
+        let renamed_from = |prev: &Option<Memory>, id: &str| -> Option<String> {
+            prev.as_ref().filter(|p| p.extra.get("change").map(String::as_str) == Some(id)).and_then(|p| p.extra.get("renamed_from").cloned())
+        };
         for c in changes {
             let id = crate::util::random_hex(3);
             if !approved {
@@ -217,11 +270,12 @@ impl Vault {
                         let mut m = Memory { name: slugify(&m.name), ..m.clone() };
                         let prev = self.read_memory(&m.name).ok();
                         m.stamp(prev.as_ref(), Some(agent));
-                        put(&mut m, &id, &[])?;
+                        let from = renamed_from(&prev, &id);
+                        put(&mut m, &id, &from.iter().map(|f| ("renamed_from", f.as_str())).collect::<Vec<_>>())?;
                     }
                     Op::Rename { from, to } => {
-                        let mut old = self.read_memory(from)?;
-                        let mut new = Memory { name: slugify(to), ..old.clone() };
+                        let mut old = before[&slugify(from)].clone();
+                        let mut new = Memory { name: slugify(to), ..self.read_memory(from)? };
                         new.stamp(None, Some(agent));
                         put(&mut new, &id, &[("renamed_from", &old.name)])?;
                         if approved {
@@ -236,10 +290,11 @@ impl Vault {
                         let mut m = prev.clone();
                         set_visibility(&mut m, &check_visibility(visibility)?);
                         m.stamp(Some(&prev), Some(agent));
-                        put(&mut m, &id, &[])?;
+                        let from = renamed_from(&Some(prev), &id);
+                        put(&mut m, &id, &from.iter().map(|f| ("renamed_from", f.as_str())).collect::<Vec<_>>())?;
                     }
                     Op::Remove { name, into } => {
-                        let mut m = self.read_memory(name)?;
+                        let mut m = before[&slugify(name)].clone();
                         if approved {
                             gone.push(m.name.clone());
                         } else {

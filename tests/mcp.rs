@@ -288,3 +288,19 @@ fn a_folder_in_several_projects_names_the_handoff_project() {
     let (_, out) = c.call("handoff", json!({"topic": "ci", "content": "Fixing the macOS job.", "project": "engine"}), "accept");
     assert!(out.contains("handoff `engine-handoff-ci` saved · only in project engine"), "{out}");
 }
+
+#[test]
+fn a_rename_and_an_edit_go_in_one_change() {
+    let ops = json!({"changes": [{"title": "rename and tighten", "ops": [
+        {"op": "rename", "from": "pr-style", "to": "commit-style"},
+        {"op": "write", "name": "commit-style", "content": "Conventional commits, short subjects."}]}]});
+    for dialogs in [true, false] {
+        let (tmp, v) = setup();
+        let mut c = Client::start(&v, tmp.path(), dialogs);
+        let (shown, out) = c.call("propose_changes", ops.clone(), "accept");
+        assert_eq!(shown.is_some(), dialogs, "{out}");
+        let m = v.read_memory("commit-style").unwrap();
+        assert_eq!((m.kind.as_str(), m.body.trim(), m.needs_review()), ("feedback", "Conventional commits, short subjects.", !dialogs), "{out}");
+        assert_eq!(v.read_memory("pr-style").is_ok(), !dialogs, "pending removal until reviewed");
+    }
+}

@@ -115,3 +115,55 @@ fn a_pending_change_reads_as_a_git_diff() {
     assert!(r.contains("rename from a/memories/feedback-concise.md") && r.contains("rename to b/memories/concise.md"), "{r}");
     assert!(diff("scope").contains("+visibility: private"));
 }
+
+fn change(ops: Vec<Op>) -> Change {
+    Change { title: "tidy".into(), why: String::new(), ops }
+}
+
+fn rename_op() -> Op {
+    Op::Rename { from: "feedback-concise".into(), to: "concise".into() }
+}
+
+fn edit(name: &str) -> Op {
+    Op::Write(Memory { description: "about feedback-concise".into(), ..mem(name, "Be brief.\nSkip preambles.") })
+}
+
+#[test]
+fn a_rename_and_an_edit_in_one_change_review_as_a_rename_with_edits() {
+    for ops in [vec![rename_op(), edit("concise")], vec![edit("feedback-concise"), rename_op()]] {
+        let (_t, v) = vault();
+        v.apply_changes(&[change(ops.clone())], "claude-code", false).unwrap();
+        let pending = v.pending_changes().unwrap();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        let new = v.read_memory("concise").unwrap();
+        assert_eq!((new.body.trim(), new.extra.get("renamed_from").map(String::as_str)), ("Be brief.\nSkip preambles.", Some("feedback-concise")), "{ops:?}");
+        let old = v.read_memory("feedback-concise").unwrap();
+        assert_eq!((old.body.trim(), old.status(), old.extra.get("into").map(String::as_str)), ("Be brief.", Some("forget"), Some("concise")));
+        assert_eq!(describe(&v, &pending[0].ops(), true), ["→ rename feedback-concise → concise (content)"]);
+        let diff = v.diff_change(&pending[0], false).unwrap();
+        assert!(diff.contains("rename from a/memories/feedback-concise.md") && diff.contains("+Skip preambles."), "{diff}");
+        v.approve_change(&pending[0]).unwrap();
+        assert!(v.read_memory("feedback-concise").is_err() && !v.read_memory("concise").unwrap().needs_review());
+
+        let (_t, v) = vault();
+        v.apply_changes(&[change(ops)], "claude-code", true).unwrap();
+        assert!(v.read_memory("feedback-concise").is_err() && v.read_memory("concise").unwrap().body.trim() == "Be brief.\nSkip preambles.");
+    }
+}
+
+#[test]
+fn ops_after_a_rename_use_the_new_name_only() {
+    let (_t, v) = vault();
+    let scope = Op::Scope { name: "concise".into(), visibility: "private".into() };
+    assert_eq!(describe(&v, &[rename_op(), scope.clone()], false), ["→ rename feedback-concise → concise (same content)", "◎ concise: seen everywhere → private"]);
+    v.apply_changes(&[change(vec![rename_op(), scope])], "claude-code", true).unwrap();
+    assert_eq!(v.read_memory("concise").unwrap().extra.get("visibility").map(String::as_str), Some("private"));
+
+    let (_t, v) = vault();
+    let err = |ops: Vec<Op>| v.apply_changes(&[change(ops)], "claude-code", false).unwrap_err().to_string();
+    assert!(err(vec![rename_op(), Op::Scope { name: "feedback-concise".into(), visibility: "private".into() }]).contains("renamed or removed earlier in this change"));
+    assert!(err(vec![Op::Remove { name: "atomic-prs".into(), into: None }, edit("atomic-prs")]).contains("renamed or removed earlier in this change"));
+    let two = v.apply_changes(&[change(vec![rename_op()]), change(vec![edit("concise")])], "claude-code", false).unwrap_err().to_string();
+    assert_eq!(two, "`concise` is in two changes: put every op on one memory in the same change");
+    assert!(v.pending_changes().unwrap().is_empty());
+}
