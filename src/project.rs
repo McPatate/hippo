@@ -42,20 +42,36 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .args(args)
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_NO_LAZY_FETCH", "1")
         .stderr(std::process::Stdio::null())
         .output()
         .ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
+/// A repo's root commits. Finding them walks the whole history, so they are cached by top level
+/// in the hippo home (`roots.json`, local: paths differ per device), checked against the repo on
+/// each use (another repo cloned at the same path must not inherit them).
+fn roots(toplevel: &Path) -> Vec<String> {
+    let path = crate::config::hippo_home().join("roots.json");
+    let mut cache: BTreeMap<String, Vec<String>> = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+    let key = toplevel.to_string_lossy().to_string();
+    if let Some(r) = cache.get(&key).filter(|r| !r.is_empty() && r.iter().all(|c| git(toplevel, &["cat-file", "-e", &format!("{c}^{{commit}}")]).is_some())) {
+        return r.clone();
+    }
+    let found: Vec<String> = git(toplevel, &["rev-list", "--max-parents=0", "HEAD"]).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default();
+    if !found.is_empty() {
+        cache.insert(key, found.clone());
+        let _ = crate::util::atomic_write(&path, serde_json::to_string(&cache).unwrap_or_default().as_bytes());
+    }
+    found
+}
+
 impl Ident {
     pub fn of(dir: &Path) -> Ident {
         let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
         let toplevel = git(&dir, &["rev-parse", "--show-toplevel"]).map(PathBuf::from);
-        let roots = match toplevel {
-            Some(_) => git(&dir, &["rev-list", "--max-parents=0", "HEAD"]).map(|s| s.lines().map(str::to_string).collect()).unwrap_or_default(),
-            None => vec![],
-        };
+        let roots = toplevel.as_deref().map(roots).unwrap_or_default();
         Ident { dir, toplevel, roots }
     }
 

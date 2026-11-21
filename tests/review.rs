@@ -9,6 +9,13 @@ fn mem(name: &str, body: &str) -> Memory {
 }
 
 fn vault() -> (tempfile::TempDir, Vault) {
+    // Keep the repo roots cache out of the real hippo home; every test starts here, so no thread reads the env meanwhile.
+    static HOME: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    HOME.get_or_init(|| {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("HIPPO_HOME", home.path()) };
+        home
+    });
     let tmp = tempfile::tempdir().unwrap();
     let key = Key::generate(&tmp.path().join("key.txt")).unwrap();
     let v = Vault::init(&tmp.path().join("v"), &key).unwrap();

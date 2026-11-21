@@ -4,6 +4,7 @@
 //! ~/.hippo/                 HIPPO_HOME
 //!   key.txt                 vault key (age identity), chmod 600 — HIPPO_KEY overrides
 //!   config.toml             global config: default vault
+//!   roots.json              git root commits by repo folder (a cache)
 //!   <vault>/                default vault location: ~/.hippo/memory
 //! ```
 
