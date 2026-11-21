@@ -519,7 +519,9 @@ impl HippoServer {
             }
             None => self.project_key(&vault, None).map_err(err)?,
         };
-        let name = crate::memory::slugify(&format!("{key}-handoff-{}", a.topic));
+        let topic = crate::memory::slugify(&a.topic);
+        let topic = topic.strip_prefix(&format!("{key}-")).filter(|t| !t.is_empty()).unwrap_or(&topic);
+        let name = format!("{key}-handoff-{topic}");
         let existing = vault.read_memory(&name).ok();
         if existing.as_ref().is_some_and(|m| !self.reviewable(m)) {
             return Err(McpError::invalid_params(format!("the name `{name}` is taken outside this project; pick another topic"), None));

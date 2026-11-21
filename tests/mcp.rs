@@ -260,6 +260,8 @@ fn handoffs_replace_the_last_one_on_their_topic_without_review() {
     assert_eq!(v.read_memory(&name).unwrap().body.trim(), "Tagged; publish wheels.");
     let log = std::fs::read_to_string(v.root.join(".hippo/log.jsonl")).unwrap();
     assert!(log.lines().rfind(|l| l.contains("\"action\":\"handoff\"")).unwrap().contains("\"new\":false"), "{log}");
+    let (_, out) = c.call("handoff", json!({"topic": format!("{key} 0.9 release"), "content": "Wheels out."}), "accept");
+    assert!(out.contains(&format!("`{name}`")) && out.contains("replaces"), "{out}");
     let (_, out) = c.call("pending_changes", json!({}), "accept");
     assert!(out.starts_with("🦛 hippo 0 change(s) waiting"), "{out}");
 
