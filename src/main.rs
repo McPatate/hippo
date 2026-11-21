@@ -752,10 +752,11 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let idx = hippo::context::index(&v.list().unwrap_or_default(), &scope, hippo::context::BUDGET);
             let names: Vec<&str> = idx.lines().filter_map(|l| l.strip_prefix("- ")).filter(|l| !l.starts_with('…')).filter_map(|l| l.split(' ').next()).collect();
             let total: usize = idx.split_whitespace().nth(2).and_then(|n| n.parse().ok()).unwrap_or(0);
+            let pending = if idx.is_empty() { 0 } else { v.pending_count().unwrap_or(0) };
             let mut d = json!({
                 "count": names.len(), "cut": total.saturating_sub(names.len()), "shared": "descriptions",
                 "source": hook["source"], "session": hook["session_id"].as_str().map(|s| &s[..s.len().min(8)]),
-                "project": scope.keys.first(), "ms": t.elapsed().as_millis(),
+                "project": scope.keys.first(), "pending": pending, "ms": t.elapsed().as_millis(),
             });
             // The names only when the list changed, so a session start stays one short line.
             if hippo::context::changed(&v, &scope, &names) {
@@ -763,6 +764,9 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             }
             hippo::log::record(&v.root, "context", d);
             print!("{idx}");
+            if pending > 0 {
+                println!("🦛 {pending} change(s) to the memory wait for the user's decision: suggest `/hippo review` when it fits.");
+            }
             Ok(())
         }
         Cmd::Connect { harness: Harness::Claude { no_statusline, pixel } } => {

@@ -267,6 +267,15 @@ impl Vault {
     /// `remember`/`forget`) are one change each, except a removal and a new memory with the same
     /// content, shown as the rename it was.
     pub fn pending_changes(&self) -> Result<Vec<Pending>> {
+        self.group_pending(true)
+    }
+
+    /// How many changes wait for the user, without the git lookups that title them.
+    pub fn pending_count(&self) -> Result<usize> {
+        Ok(self.group_pending(false)?.len())
+    }
+
+    fn group_pending(&self, titled: bool) -> Result<Vec<Pending>> {
         let ledger = load(&self.root)?;
         let mut grouped: BTreeMap<String, Vec<Memory>> = BTreeMap::new();
         let mut loose = vec![];
@@ -293,6 +302,7 @@ impl Vault {
         for m in loose.into_iter().filter(|m| !paired.contains(&m.name)) {
             let title = match m.status() {
                 Some("forget") => format!("delete {}", m.name),
+                _ if !titled => format!("change {}", m.name),
                 _ if self.approved_version(&m.name)?.is_some() => format!("edit {}", m.name),
                 _ => format!("new {}", m.name),
             };

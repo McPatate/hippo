@@ -61,3 +61,35 @@ fn add_sets_visibility_only_for_known_projects() {
     assert!(add("all").status.success());
     assert!(!v.read_memory("signoff").unwrap().extra.contains_key("visibility"));
 }
+
+#[test]
+fn session_start_index_ends_with_a_review_nudge() {
+    use std::io::Write;
+    let tmp = tempfile::tempdir().unwrap();
+    let key = hippo::crypto::Key::generate(&tmp.path().join("key.txt")).unwrap();
+    let v = hippo::vault::Vault::init(&tmp.path().join("v"), &key).unwrap();
+    let mem = |name: &str| hippo::memory::Memory { name: name.into(), kind: "feedback".into(), body: format!("About {name}."), ..Default::default() };
+    v.remember(&mem("pr-style")).unwrap();
+    let context = || {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hippo"))
+            .env("HIPPO_HOME", tmp.path())
+            .env("CLAUDE_CONFIG_DIR", tmp.path().join("claude"))
+            .arg("--vault")
+            .arg(&v.root)
+            .arg("context")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(child.stdin.take().unwrap(), "{}", serde_json::json!({"cwd": tmp.path()})).unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+    assert!(!context().contains("/hippo review"));
+    v.remember_by(&mem("atomic-prs"), Some("claude-code")).unwrap();
+    v.remember_by(&mem("tabs"), Some("claude-code")).unwrap();
+    let out = context();
+    assert!(out.starts_with("🦛 hippo: 3 memories"), "{out}");
+    assert!(out.lines().last().unwrap().starts_with("🦛 2 change(s) to the memory wait for the user's decision"), "{out}");
+    let log = std::fs::read_to_string(v.root.join(".hippo/log.jsonl")).unwrap();
+    assert!(log.lines().last().unwrap().contains("\"pending\":2"), "{log}");
+}
