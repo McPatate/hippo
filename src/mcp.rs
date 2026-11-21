@@ -62,10 +62,20 @@ pub struct HippoServer {
     scope: Arc<std::sync::RwLock<Scope>>,
     /// The agent session this server runs for (Claude Code's id when it gives one, as the context hook logs it).
     session: String,
+    /// Where the vault was when this session last looked, so rules saved elsewhere since reach it.
+    news: Arc<std::sync::Mutex<News>>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
     #[allow(dead_code)]
     prompt_router: rmcp::handler::server::router::prompt::PromptRouter<Self>,
+}
+
+struct News {
+    head: Option<String>,
+    /// Whole seconds, like `updated`: memories stamped at or after it are new.
+    since: chrono::DateTime<chrono::Utc>,
+    /// Names this server wrote or already announced.
+    known: std::collections::BTreeSet<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -211,6 +221,12 @@ fn reject_secrets(vault: &Vault, text: &str) -> Result<(), McpError> {
     ))
 }
 
+/// Now, to the second, as memories stamp `updated`.
+fn this_second() -> chrono::DateTime<chrono::Utc> {
+    let now = crate::util::now();
+    chrono::DurationRound::duration_trunc(now, chrono::TimeDelta::seconds(1)).unwrap_or(now)
+}
+
 fn err(e: anyhow::Error) -> McpError {
     McpError::internal_error(format!("{e:#}"), None)
 }
@@ -219,8 +235,14 @@ fn err(e: anyhow::Error) -> McpError {
 impl HippoServer {
     pub fn new(vault_path: PathBuf, key_path: PathBuf) -> Self {
         let cwd = std::env::current_dir().unwrap_or_default();
+        let since = this_second();
+        let mut news = News { head: None, since, known: Default::default() };
         let scope = match Vault::open(&vault_path) {
-            Ok(v) => Scope::here(&v, &cwd),
+            Ok(v) => {
+                news.head = v.git.head_fast().ok().flatten();
+                news.known = v.list().unwrap_or_default().into_iter().filter(|m| m.updated().is_some_and(|t| t >= since)).map(|m| m.name).collect();
+                Scope::here(&v, &cwd)
+            }
             Err(_) => Scope { dir: cwd, keys: vec![] },
         };
         Self {
@@ -230,6 +252,7 @@ impl HippoServer {
             backup_again: Arc::default(),
             greeted: Arc::default(),
             scope: Arc::new(std::sync::RwLock::new(scope)),
+            news: Arc::new(std::sync::Mutex::new(news)),
             session: std::env::var("CLAUDE_CODE_SESSION_ID").ok().and_then(|s| s.get(..8).map(String::from)).unwrap_or_else(|| crate::util::random_hex(4)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
@@ -297,6 +320,31 @@ impl HippoServer {
         Ok(key)
     }
 
+    /// This server's own writes are not news to it.
+    fn wrote<S: AsRef<str>>(&self, names: impl IntoIterator<Item = S>) {
+        self.news.lock().unwrap().known.extend(names.into_iter().map(|n| crate::memory::slugify(n.as_ref())));
+    }
+
+    /// Rules (`feedback`, `user`) other sessions saved since this one last looked; only when HEAD moved.
+    fn news(&self, vault: &Vault) -> Vec<String> {
+        let mut news = self.news.lock().unwrap();
+        let head = vault.git.head_fast().ok().flatten();
+        if head.is_none() || head == news.head {
+            return vec![];
+        }
+        let now = this_second();
+        let fresh: Vec<String> = vault
+            .list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| matches!(m.kind.as_str(), "feedback" | "user") && m.updated().is_some_and(|t| t >= news.since) && !news.known.contains(&m.name) && self.visible(m))
+            .map(|m| m.name)
+            .collect();
+        news.known.extend(fresh.iter().cloned());
+        (news.head, news.since) = (head, now);
+        fresh
+    }
+
     fn vault(&self) -> Result<Vault, McpError> {
         Vault::open(&self.vault_path).map_err(err)
     }
@@ -306,6 +354,10 @@ impl HippoServer {
     fn reply(&self, vault: &Vault, receipt: String, body: String) -> Result<CallToolResult, McpError> {
         let conflicts = vault.unresolved_conflicts().map_err(err)?;
         let mut text = format!("🦛 hippo {receipt}");
+        let fresh = self.news(vault);
+        if !fresh.is_empty() {
+            text += &format!("\n🦛 new since this session started: {}. `recall` them: they may change how you should work.", fresh.join(", "));
+        }
         if !conflicts.is_empty() {
             text += &format!(
                 "\n\n⚠️ MEMORY MERGE CONFLICT — resolving memory device merge conflict…\n\
@@ -402,6 +454,7 @@ impl HippoServer {
         let agent = crate::safety::agent_name().unwrap_or_else(|| "agent".into());
         let commit = vault.remember_by(&m, Some(&agent)).map_err(err)?;
         let name = crate::memory::slugify(&m.name);
+        self.wrote([&name]);
         let receipt = match &commit {
             Some(c) => {
                 let only = m.extra.get("visibility").cloned();
@@ -688,6 +741,15 @@ impl HippoServer {
         if changes.is_empty() {
             return Err(McpError::invalid_params("no changes", None));
         }
+        self.wrote(changes.iter().flat_map(|c| &c.ops).flat_map(|op| {
+            use crate::change::Op;
+            match op {
+                Op::Write(m) => vec![m.name.clone()],
+                Op::Rename { from, to } => vec![from.clone(), to.clone()],
+                Op::Scope { name, .. } => vec![name.clone()],
+                Op::Remove { name, into } => [Some(name.clone()), into.clone()].into_iter().flatten().collect(),
+            }
+        }));
         let lines: Vec<String> = changes.iter().flat_map(|c| crate::change::describe(&vault, &c.ops, false)).collect();
         let message = format!(
             "🦛 Apply {} change{} to your memory?\n{}\nTo see more first: decline and ask.",
@@ -798,6 +860,7 @@ impl HippoServer {
         if yes.is_empty() && no.is_empty() {
             return Err(McpError::invalid_params("nothing to decide", None));
         }
+        self.wrote(yes.iter().chain(&no).flat_map(|p| p.members.iter().map(|m| m.name.as_str())));
         let mut message = "🦛 Decide these changes to your memory?".to_string();
         let here = &yes[..yes.len() - others.len()];
         if !here.is_empty() {

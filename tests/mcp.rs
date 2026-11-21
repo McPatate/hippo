@@ -220,3 +220,24 @@ fn sessions_without_initialize_are_logged_once() {
     assert_eq!(sessions.len(), 1, "{log}");
     assert!(sessions[0].contains("\"client\":\"claude-code\"") && sessions[0].contains("\"protocol\":\"2026-07-28\"") && sessions[0].contains("\"dialogs\":true"), "{}", sessions[0]);
 }
+
+#[test]
+fn rules_saved_elsewhere_reach_a_running_session_once() {
+    let (tmp, v) = setup();
+    let mut c = Client::start(&v, tmp.path(), false);
+    let (_, out) = c.call("list_memories", json!({}), "accept");
+    assert!(!out.contains("new since"), "{out}");
+    let rule = |name: &str, kind: &str| Memory { name: name.into(), kind: kind.into(), body: "Use tabs.".into(), ..Default::default() };
+    v.remember(&rule("tabs", "feedback")).unwrap();
+    v.remember(&rule("trip-notes", "note")).unwrap();
+    let (_, out) = c.call("remember", json!({"name": "my-rule", "content": "Mine.", "type": "feedback"}), "accept");
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines[0].starts_with("🦛 hippo remembered `my-rule`"), "{out}");
+    assert_eq!(lines[1], "🦛 new since this session started: tabs. `recall` them: they may change how you should work.");
+    v.remember(&rule("tabs", "feedback")).unwrap();
+    v.remember(&rule("tabs-too", "user")).unwrap();
+    let (_, out) = c.call("list_memories", json!({}), "accept");
+    assert!(out.lines().nth(1).unwrap().contains("new since this session started: tabs-too."), "{out}");
+    let (_, out) = c.call("list_memories", json!({}), "accept");
+    assert!(!out.contains("new since"), "{out}");
+}
