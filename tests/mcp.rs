@@ -304,3 +304,17 @@ fn a_rename_and_an_edit_go_in_one_change() {
         assert_eq!(v.read_memory("pr-style").is_ok(), !dialogs, "pending removal until reviewed");
     }
 }
+
+#[test]
+fn an_invalid_batch_is_refused_before_any_dialog() {
+    let (tmp, v) = setup();
+    let mut c = Client::start(&v, tmp.path(), true);
+    let head = v.git.head_fast().unwrap();
+    let ops = json!({"changes": [
+        {"title": "rename", "ops": [{"op": "rename", "from": "pr-style", "to": "commit-style"}]},
+        {"title": "edit", "ops": [{"op": "write", "name": "commit-style", "content": "Short subjects."}]}]});
+    let (shown, out) = c.call("propose_changes", ops, "accept");
+    assert!(shown.is_none(), "{shown:?}");
+    assert!(out.contains("`commit-style` is in two changes: put every op on one memory in the same change"), "{out}");
+    assert_eq!(v.git.head_fast().unwrap(), head);
+}

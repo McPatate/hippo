@@ -821,6 +821,7 @@ impl HippoServer {
         if changes.is_empty() {
             return Err(McpError::invalid_params("no changes", None));
         }
+        vault.check_changes(&changes).map_err(|e| McpError::invalid_params(format!("{e:#}: nothing was asked or applied"), None))?;
         self.wrote(changes.iter().flat_map(|c| &c.ops).flat_map(|op| {
             use crate::change::Op;
             match op {
