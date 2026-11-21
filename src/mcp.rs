@@ -288,7 +288,7 @@ impl HippoServer {
 
     /// Log locally with where the agent works and its session (signals for the smart review).
     fn log(&self, vault: &Vault, action: &str, mut details: serde_json::Value) {
-        details["project"] = serde_json::json!(self.scope.read().unwrap().keys.first());
+        details["project"] = serde_json::json!(self.scope.read().unwrap().keys.join("+"));
         details["session"] = serde_json::json!(self.session);
         crate::log::record(&vault.root, action, details);
     }

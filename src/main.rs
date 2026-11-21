@@ -756,7 +756,7 @@ async fn run(cli: &Cli, out: &Out) -> Result<()> {
             let mut d = json!({
                 "count": names.len(), "cut": total.saturating_sub(names.len()), "shared": "descriptions",
                 "source": hook["source"], "session": hook["session_id"].as_str().map(|s| &s[..s.len().min(8)]),
-                "project": scope.keys.first(), "pending": pending, "ms": t.elapsed().as_millis(),
+                "project": scope.keys.join("+"), "pending": pending, "ms": t.elapsed().as_millis(),
             });
             // The names only when the list changed, so a session start stays one short line.
             if hippo::context::changed(&v, &scope, &names) {

@@ -31,7 +31,11 @@ pub fn index(memories: &[Memory], scope: &Scope, budget: usize) -> String {
          to the task, `search_memories` for anything else. They are general guidance from past \
          sessions and can be outdated; what the user says now wins.\n",
         seen.len(),
-        scope.keys.first().map(|k| format!(" in project `{k}`")).unwrap_or_default()
+        match scope.keys.as_slice() {
+            [] => String::new(),
+            [k] => format!(" in project `{k}`"),
+            ks => format!(" in projects {}", ks.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")),
+        }
     );
     for (i, m) in seen.iter().enumerate() {
         let line = format!("- {} [{}]{} {}\n", m.name, label(m), if m.needs_review() { " (unconfirmed)" } else { "" }, m.description);
