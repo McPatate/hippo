@@ -191,3 +191,32 @@ fn project_writes_say_where_they_are_seen_and_refuse_unknown_projects() {
     let line = log.lines().find(|l| l.contains("\"remember\"")).unwrap();
     assert!(line.contains("\"session\":\"5e55101d\"") && line.contains(&format!("\"visibility\":\"project:{here}\"")), "{line}");
 }
+
+#[test]
+fn sessions_without_initialize_are_logged_once() {
+    let (tmp, v) = setup();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_hippo"))
+        .current_dir(tmp.path())
+        .env("HIPPO_HOME", tmp.path())
+        .args(["--vault".as_ref(), v.root.as_os_str(), "mcp".as_ref()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (mut stdin, mut stdout) = (child.stdin.take().unwrap(), BufReader::new(child.stdout.take().unwrap()));
+    let meta = json!({"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1"},
+        "io.modelcontextprotocol/clientCapabilities": {"elicitation": {"form": {}}}});
+    for id in 1..=2 {
+        let req = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {"name": "list_memories", "arguments": {}, "_meta": meta}});
+        writeln!(stdin, "{req}").unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        assert!(line.contains("pr-style"), "{line}");
+    }
+    let _ = child.kill();
+    let log = std::fs::read_to_string(v.root.join(".hippo/log.jsonl")).unwrap();
+    let sessions: Vec<&str> = log.lines().filter(|l| l.contains("\"action\":\"session\"")).collect();
+    assert_eq!(sessions.len(), 1, "{log}");
+    assert!(sessions[0].contains("\"client\":\"claude-code\"") && sessions[0].contains("\"protocol\":\"2026-07-28\"") && sessions[0].contains("\"dialogs\":true"), "{}", sessions[0]);
+}

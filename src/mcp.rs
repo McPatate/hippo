@@ -55,6 +55,8 @@ pub struct HippoServer {
     key_path: PathBuf,
     backup_running: Arc<AtomicBool>,
     backup_again: Arc<AtomicBool>,
+    /// Whether this session's client was logged yet.
+    greeted: Arc<AtomicBool>,
     /// The agent's project (stdio servers start in its folder): scope for `project:` memories.
     /// (MCP roots would be the protocol answer, but they are deprecated by SEP-2577.)
     scope: Arc<std::sync::RwLock<Scope>>,
@@ -226,10 +228,22 @@ impl HippoServer {
             key_path,
             backup_running: Arc::default(),
             backup_again: Arc::default(),
+            greeted: Arc::default(),
             scope: Arc::new(std::sync::RwLock::new(scope)),
             session: std::env::var("CLAUDE_CODE_SESSION_ID").ok().and_then(|s| s.get(..8).map(String::from)).unwrap_or_else(|| crate::util::random_hex(4)),
             tool_router: Self::tool_router(),
             prompt_router: Self::prompt_router(),
+        }
+    }
+
+    /// Note who the client is, once per session.
+    fn greet(&self, client: &Implementation, protocol: &ProtocolVersion, dialogs: bool) {
+        if self.greeted.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        crate::safety::set_agent_name(&client.name);
+        if let Ok(vault) = self.vault() {
+            self.log(&vault, "session", serde_json::json!({"client": client.name, "version": client.version, "protocol": protocol, "dialogs": dialogs}));
         }
     }
 
@@ -880,14 +894,18 @@ impl ServerHandler for HippoServer {
 
     async fn on_initialized(&self, context: rmcp::service::NotificationContext<rmcp::RoleServer>) {
         if let Some(info) = context.peer.peer_info() {
-            crate::safety::set_agent_name(&info.client_info.name);
-            if let Ok(vault) = self.vault() {
-                let dialogs = context.peer.supported_elicitation_modes().contains(&ElicitationMode::Form);
-                let (client, version) = (&info.client_info.name, &info.client_info.version);
-                self.log(&vault, "session", serde_json::json!({"client": client, "version": version, "protocol": info.protocol_version, "dialogs": dialogs}));
-            }
+            let dialogs = context.peer.supported_elicitation_modes().contains(&ElicitationMode::Form);
+            self.greet(&info.client_info, &info.protocol_version, dialogs);
         }
+    }
 
+    /// Clients on 2026-07-28 and later skip `initialize`: they describe themselves on each request.
+    async fn call_tool(&self, request: CallToolRequestParams, context: RequestContext<RoleServer>) -> Result<CallToolResponse, McpError> {
+        if let (Some(client), Some(protocol)) = (context.client_info(), context.protocol_version()) {
+            self.greet(&client, &protocol, context.client_capabilities().is_some_and(|c| c.elicitation.is_some()));
+        }
+        let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        self.tool_router.call(tcc).await
     }
 }
 
