@@ -22,7 +22,8 @@ pub fn record(vault: &Path, action: &str, details: Value) {
         let _ = std::fs::rename(&path, path.with_file_name("log.1.jsonl"));
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(f, "{entry}");
+        // One write per line: concurrent sessions append to the same file.
+        let _ = f.write_all(format!("{entry}\n").as_bytes());
     }
 }
 
